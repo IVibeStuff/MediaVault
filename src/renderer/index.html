@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' file: data: blob:; img-src 'self' file: data: blob: https:; connect-src 'self' https: fonts.googleapis.com fonts.gstatic.com; font-src 'self' fonts.gstatic.com data:;">
+  <title>MediaVault</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;900&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=5">
+</head>
+<body class="theme-dark">
+
+  <div id="app">
+
+    <!-- Titlebar -->
+    <div class="titlebar">
+      <div class="titlebar-drag"></div>
+      <div class="titlebar-left">
+        <div class="app-logo">
+          <svg width="20" height="20" viewBox="0 0 22 22" fill="none">
+            <path d="M4 3C4 2.448 4.448 2 5 2h12c.552 0 1 .448 1 1v16c0 .552-.448 1-1 1H5c-.552 0-1-.448-1-1V3z" fill="var(--accent)"/>
+            <path d="M9 8l6 3-6 3V8z" fill="var(--bg-primary)"/>
+          </svg>
+        </div>
+        <span class="app-title">MediaVault</span>
+      </div>
+      <div class="titlebar-controls">
+        <button class="tb-btn" id="btn-minimize"><svg width="12" height="2" viewBox="0 0 12 2"><rect width="12" height="2" rx="1" fill="currentColor"/></svg></button>
+        <button class="tb-btn" id="btn-maximize"><svg width="11" height="11" viewBox="0 0 11 11"><rect x="0.5" y="0.5" width="10" height="10" rx="1" stroke="currentColor" fill="none"/></svg></button>
+        <button class="tb-btn close" id="btn-close"><svg width="11" height="11" viewBox="0 0 11 11"><line x1="1" y1="1" x2="10" y2="10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="10" y1="1" x2="1" y2="10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+      </div>
+    </div>
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <nav class="sidebar-nav">
+        <button class="nav-item active" data-view="library">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="3" width="7" height="18" rx="1"/><rect x="9.5" y="3" width="5" height="18" rx="1"/><path d="M16 3l4 1.5v15L16 21"/></svg>
+          <span>Library</span>
+        </button>
+        <button class="nav-item" data-view="movies">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 17h5M17 7h5"/></svg>
+          <span>Movies</span>
+        </button>
+        <button class="nav-item" data-view="tv">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="15" rx="2"/><path d="M8 7l4-5 4 5M9 22v-3M15 22v-3"/></svg>
+          <span>TV Shows</span>
+        </button>
+        <button class="nav-item" data-view="watchlist">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+          <span>My List</span>
+          <span class="nav-badge" id="watchlist-badge" style="display:none"></span>
+        </button>
+        <button class="nav-item" data-view="settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
+          <span>Settings</span>
+        </button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="stats-mini"><span id="stat-total">0 files</span></div>
+        <button class="scan-btn" id="rescan-btn" title="Rescan all watched folders for new content">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          Rescan
+        </button>
+        <button class="scan-btn" id="scan-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+          Add Folder
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main-content">
+
+      <!-- Library View -->
+      <div class="view active" id="view-library">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <h1 class="view-title" id="view-title">All Media</h1>
+            <span class="view-count" id="view-count">0 items</span>
+          </div>
+          <div class="toolbar-right">
+            <div class="search-box">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input type="text" id="search-input" placeholder="Search… or press Enter on a name for Actor Profile">
+            </div>
+            <select id="sort-select" class="sort-select">
+              <option value="title-asc">Name A→Z</option>
+              <option value="title-desc">Name Z→A</option>
+              <option value="size-desc">Size ↓</option>
+              <option value="size-asc">Size ↑</option>
+              <option value="date-desc">Newest First</option>
+              <option value="date-asc">Oldest First</option>
+              <option value="imdb-desc">IMDB Score ↓</option>
+              <option value="rating-desc">TMDB Score ↓</option>
+              <option value="year-desc">Year Newest First</option>
+              <option value="year-asc">Year Oldest First</option>
+              <option value="year-grouped">── Group by Year ──</option>
+            </select>
+            <div class="view-toggle">
+              <button class="view-btn active" id="grid-view-btn" title="Grid">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+              </button>
+              <button class="view-btn" id="list-view-btn" title="List">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="progress-bar-container" id="progress-container" style="display:none">
+          <div class="progress-info"><span id="progress-label">Scanning...</span><span id="progress-pct">0%</span></div>
+          <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+        </div>
+        <div class="media-grid grid-medium" id="media-grid">
+          <div class="empty-state" id="empty-state-initial">
+            <div class="empty-icon"><svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg></div>
+            <h2>No media found</h2>
+            <p>Add a folder to start building your library</p>
+            <button class="btn-primary" id="empty-scan-btn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+              Add Folder
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings View -->
+      <div class="view" id="view-settings">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <h1 class="view-title">Settings</h1>
+          </div>
+        </div>
+
+        <!-- TAB BUTTONS — only buttons here, nothing else -->
+        <div class="settings-tabs" id="settings-tabs">
+          <button class="settings-tab-btn active" data-tab="api">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 20l4-16M4 9l-3 3 3 3M20 9l3 3-3 3"/></svg>
+            API Keys
+          </button>
+          <button class="settings-tab-btn" data-tab="library">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            Library
+          </button>
+          <button class="settings-tab-btn" data-tab="hidden">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            Hidden
+          </button>
+          <button class="settings-tab-btn" data-tab="customise">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            Customise
+          </button>
+          <button class="settings-tab-btn" data-tab="streaming">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            Streaming
+          </button>
+          <button class="settings-tab-btn" data-tab="advanced">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            Advanced
+          </button>
+          <button class="settings-tab-btn" data-tab="backup">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Backup
+          </button>
+        </div>
+
+        <!-- TAB PANES — sibling of settings-tabs, NOT inside it -->
+        <div class="settings-content">
+
+          <!-- API Keys -->
+          <div class="settings-tab-pane active" id="stab-api">
+            <p class="settings-desc">Enter your free API keys to fetch cover art, descriptions, IMDB scores and episode info.</p>
+            <div class="setting-row">
+              <div class="setting-info">
+                <label class="setting-label">TMDB API Key</label>
+                <span class="setting-hint">Free at themoviedb.org/settings/api — posters, overviews, genres, cast, episode data</span>
+              </div>
+              <div class="setting-input-group">
+                <input type="password" id="tmdb-key" class="setting-input" placeholder="Your TMDB v3 key…">
+                <button class="btn-secondary" id="save-tmdb">Save</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <label class="setting-label">OMDB API Key</label>
+                <span class="setting-hint">Free at omdbapi.com/apikey.aspx — IMDB ratings, awards, director, content rating</span>
+              </div>
+              <div class="setting-input-group">
+                <input type="password" id="omdb-key" class="setting-input" placeholder="Your OMDB key…">
+                <button class="btn-secondary" id="save-omdb">Save</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <label class="setting-label">Auto-fetch on scan</label>
+                <span class="setting-hint">Automatically download metadata when new files are found</span>
+              </div>
+              <label class="toggle"><input type="checkbox" id="auto-fetch" checked><span class="toggle-slider"></span></label>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <label class="setting-label">Download poster art</label>
+                <span class="setting-hint">Cache poster images locally in ~/.mediavault/cache/</span>
+              </div>
+              <label class="toggle"><input type="checkbox" id="dl-posters" checked><span class="toggle-slider"></span></label>
+            </div>
+          </div>
+
+          <!-- Library -->
+          <div class="settings-tab-pane" id="stab-library">
+            <div class="settings-section">
+              <h3 class="settings-section-title">Watched Folders</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-hint" id="watched-folders-hint">Folders scanned for movies and TV shows</span>
+                </div>
+                <button class="btn-secondary" id="settings-add-folder">Add Folder</button>
+              </div>
+              <div id="folder-list" class="folder-list"></div>
+            </div>
+            <div class="settings-section">
+              <h3 class="settings-section-title">Excluded Folders</h3>
+              <p class="settings-desc" style="margin-bottom:12px">Folders listed here are never scanned. Any content already in your library from these paths will be removed immediately.</p>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <span class="setting-hint">Add a folder to permanently exclude it from scanning</span>
+                </div>
+                <button class="btn-secondary" id="add-excluded-folder">Exclude Folder</button>
+              </div>
+              <div id="excluded-folder-list" class="folder-list"></div>
+            </div>
+          </div>
+
+          <!-- Hidden Folders -->
+          <div class="settings-tab-pane" id="stab-hidden">
+            <p class="settings-desc">Folders listed here are excluded from scanning. Files inside hidden folders will not appear in your library. You can un-hide them at any time.</p>
+            <div id="hidden-folder-list" class="folder-list"></div>
+            <div id="hidden-empty" class="hidden-empty-msg" style="display:none">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              <p>No hidden folders</p>
+            </div>
+          </div>
+
+          <!-- Customise -->
+          <div class="settings-tab-pane" id="stab-customise">
+            <div class="settings-section">
+              <h3 class="settings-section-title">Appearance</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Colour Theme</label>
+                  <span class="setting-hint">Switch between dark cinematic and light pastel modes</span>
+                </div>
+                <div class="theme-toggle-group">
+                  <button class="theme-option" data-theme="dark">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                    Dark
+                  </button>
+                  <button class="theme-option" data-theme="light">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                    Light
+                  </button>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Accent Colour</label>
+                  <span class="setting-hint">Primary highlight colour throughout the app</span>
+                </div>
+                <div class="color-picker-group">
+                  <input type="color" id="accent-color" class="color-picker" value="#7c5cfc">
+                  <div class="color-presets">
+                    <button class="color-preset" style="background:#7c5cfc" data-color="#7c5cfc" title="Violet"></button>
+                    <button class="color-preset" style="background:#3b82f6" data-color="#3b82f6" title="Blue"></button>
+                    <button class="color-preset" style="background:#10b981" data-color="#10b981" title="Emerald"></button>
+                    <button class="color-preset" style="background:#f59e0b" data-color="#f59e0b" title="Amber"></button>
+                    <button class="color-preset" style="background:#ef4444" data-color="#ef4444" title="Red"></button>
+                    <button class="color-preset" style="background:#ec4899" data-color="#ec4899" title="Pink"></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="settings-section">
+              <h3 class="settings-section-title">Typography</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Font Family</label>
+                  <span class="setting-hint">Change the interface typeface</span>
+                </div>
+                <select id="font-family" class="sort-select">
+                  <option value="Outfit">Outfit (Default)</option>
+                  <option value="Inter">Inter</option>
+                  <option value="DM Sans">DM Sans</option>
+                  <option value="Syne">Syne</option>
+                  <option value="Space Grotesk">Space Grotesk</option>
+                  <option value="System">System Default</option>
+                </select>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Font Size</label>
+                  <span class="setting-hint">Adjust the base text size</span>
+                </div>
+                <div class="size-btn-group">
+                  <button class="fontsize-option" data-size="small">S</button>
+                  <button class="fontsize-option active" data-size="medium">M</button>
+                  <button class="fontsize-option" data-size="large">L</button>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Secondary Text Brightness</label>
+                  <span class="setting-hint">Controls how bright subtitle text, year labels and metadata appear</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px;">
+                  <input type="range" id="text-contrast-slider" min="-30" max="30" step="1" value="0" style="width:120px;accent-color:var(--accent)">
+                  <span id="text-contrast-label" style="font-size:12px;font-family:'DM Mono',monospace;color:var(--t1);min-width:24px;text-align:right">0</span>
+                </div>
+              </div>
+            </div>
+            <div class="settings-section">
+              <h3 class="settings-section-title">Layout</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Poster Size</label>
+                  <span class="setting-hint">Grid card size — larger shows bigger cover art</span>
+                </div>
+                <div class="size-btn-group">
+                  <button class="gridsize-option" data-size="small">Small</button>
+                  <button class="gridsize-option active" data-size="medium">Medium</button>
+                  <button class="gridsize-option" data-size="large">Large</button>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Movie Detail View</label>
+                  <span class="setting-hint">Minimal: side panel · Detailed: full-screen cinematic overlay with backdrop</span>
+                </div>
+                <div class="size-btn-group">
+                  <button class="detail-view-option" data-type="movie" data-mode="minimal">Minimal</button>
+                  <button class="detail-view-option" data-type="movie" data-mode="frosted">Frosted</button>
+                  <button class="detail-view-option" data-type="movie" data-mode="focused">Focused</button>
+                  <button class="detail-view-option" data-type="movie" data-mode="cinematic">Cinematic</button>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">TV Show Detail View</label>
+                  <span class="setting-hint">Minimal: side panel · Detailed: full-screen overlay with episode browser</span>
+                </div>
+                <div class="size-btn-group">
+                  <button class="detail-view-option" data-type="tv" data-mode="minimal">Minimal</button>
+                  <button class="detail-view-option" data-type="tv" data-mode="frosted">Frosted</button>
+                  <button class="detail-view-option" data-type="tv" data-mode="focused">Focused</button>
+                  <button class="detail-view-option" data-type="tv" data-mode="cinematic">Cinematic</button>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Show File Size</label>
+                  <span class="setting-hint">Display file sizes in list view</span>
+                </div>
+                <label class="toggle"><input type="checkbox" id="show-filesize" checked><span class="toggle-slider"></span></label>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Animations</label>
+                  <span class="setting-hint">Card entrance animations and hover transitions</span>
+                </div>
+                <label class="toggle"><input type="checkbox" id="animations-toggle" checked><span class="toggle-slider"></span></label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Streaming -->
+          <div class="settings-tab-pane" id="stab-streaming">
+            <div class="settings-section">
+              <h3 class="settings-section-title">Your Region</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Country</label>
+                  <span class="setting-hint">Used to check which streaming services have content available in your region</span>
+                </div>
+                <div class="setting-input-group">
+                  <input type="text" id="country-code" class="setting-input" placeholder="e.g. EE" maxlength="2" style="width:70px;text-transform:uppercase">
+                  <button class="btn-secondary" id="save-country">Save</button>
+                </div>
+              </div>
+            </div>
+            <div class="settings-section">
+              <h3 class="settings-section-title">Your Subscriptions</h3>
+              <p class="settings-desc" style="margin-bottom:14px">Tick the services you subscribe to. When browsing content, MediaVault will highlight titles available on your services.</p>
+              <div id="streaming-services-list" class="streaming-services-grid"></div>
+              <p class="settings-hint" style="margin-top:10px">Can't find your service? It will appear automatically once you set your country and browse a title that's available on it.</p>
+            </div>
+          </div>
+
+          <!-- Advanced -->
+          <div class="settings-tab-pane" id="stab-advanced">
+            <div class="settings-section">
+              <h3 class="settings-section-title">Scan Filters</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Minimum File Size</label>
+                  <span class="setting-hint">Files smaller than this (MB) are treated as samples or extras and ignored</span>
+                </div>
+                <div class="setting-input-group">
+                  <input type="number" id="min-file-size" class="setting-input" min="0" max="500" placeholder="50" style="width:70px">
+                  <span style="font-size:12px;color:var(--t2);align-self:center">MB</span>
+                  <button class="btn-secondary" id="save-scan-filters">Save</button>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Extra Junk Keywords</label>
+                  <span class="setting-hint">Additional keywords to skip, comma-separated (e.g. "extras, bonus, behind")</span>
+                </div>
+                <div class="setting-input-group">
+                  <input type="text" id="junk-keywords" class="setting-input" placeholder="keyword1, keyword2…" style="width:200px">
+                  <button class="btn-secondary" id="save-junk-keywords">Save</button>
+                </div>
+              </div>
+            </div>
+            <div class="settings-section">
+              <h3 class="settings-section-title">Metadata</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Re-fetch All Metadata</label>
+                  <span class="setting-hint">Clear cached metadata and re-download everything from the APIs</span>
+                </div>
+                <button class="btn-secondary" id="refresh-all-meta">Re-fetch All</button>
+              </div>
+            </div>
+            <div class="settings-section danger-zone">
+              <h3 class="settings-section-title">Danger Zone</h3>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Clear Library</label>
+                  <span class="setting-hint">Remove all scanned files and metadata. Your actual files are not deleted.</span>
+                </div>
+                <button class="btn-danger" id="clear-library">Clear Library</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Backup Tab -->
+          <div class="settings-tab-pane" id="stab-backup">
+            <div class="settings-section">
+              <h3 class="settings-section-title">My List</h3>
+              <p class="settings-desc">Export your watchlist to a JSON file, or import one to restore or merge your saved titles.</p>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Export My List</label>
+                  <span class="setting-hint">Saves all titles, watched states, and episode progress to a file</span>
+                </div>
+                <button class="btn-secondary" id="export-watchlist">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  Export
+                </button>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Import My List</label>
+                  <span class="setting-hint">Merges items from a previously exported file — existing items are not removed</span>
+                </div>
+                <button class="btn-secondary" id="import-watchlist">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Import
+                </button>
+              </div>
+            </div>
+            <div class="settings-section">
+              <h3 class="settings-section-title">TV Show Progress</h3>
+              <p class="settings-desc">Export your episode watched states for all TV shows in your library. Useful when moving to a new machine.</p>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Export TV Progress</label>
+                  <span class="setting-hint">Exports watched episodes for every show — matched by TMDB ID on import</span>
+                </div>
+                <button class="btn-secondary" id="export-tv-progress">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  Export
+                </button>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info">
+                  <label class="setting-label">Import TV Progress</label>
+                  <span class="setting-hint">Restores episode watched states — matches shows by TMDB ID</span>
+                </div>
+                <button class="btn-secondary" id="import-tv-progress">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Import
+                </button>
+              </div>
+            </div>
+          </div>
+
+        </div><!-- .settings-content -->
+      </div><!-- #view-settings -->
+
+
+      <!-- ─── Actor Profile View ──────────────────────────── -->
+      <div class="view" id="view-actor">
+        <div class="actor-profile-wrap" id="actor-profile-wrap">
+
+          <!-- Hero banner with backdrop blur -->
+          <div class="actor-hero" id="actor-hero">
+            <button class="actor-back-btn" id="actor-back-btn" title="Back to library">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+              Back
+            </button>
+            <div class="actor-hero-inner">
+              <div class="actor-photo-wrap">
+                <img class="actor-photo" id="actor-photo" src="" alt="">
+                <div class="actor-photo-placeholder" id="actor-photo-placeholder">
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+                </div>
+              </div>
+              <div class="actor-hero-info">
+                <div class="actor-known-for" id="actor-known-for"></div>
+                <h1 class="actor-name" id="actor-name">Loading…</h1>
+                <div class="actor-meta-row" id="actor-meta-row"></div>
+                <p class="actor-bio" id="actor-bio"></p>
+                <div class="actor-stats" id="actor-stats"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Filmography sections -->
+          <div class="actor-content" id="actor-content">
+
+            <!-- Local library section -->
+            <div class="filmography-section" id="section-local" style="display:none">
+              <div class="filmography-section-header">
+                <div class="fsh-left">
+                  <div class="fsh-dot local"></div>
+                  <h2 class="fsh-title">In Your Library</h2>
+                  <span class="fsh-count" id="local-count"></span>
+                </div>
+              </div>
+              <div class="filmography-row" id="local-films"></div>
+            </div>
+
+            <!-- Streaming section -->
+            <div class="filmography-section" id="section-streaming" style="display:none">
+              <div class="filmography-section-header">
+                <div class="fsh-left">
+                  <div class="fsh-dot streaming"></div>
+                  <h2 class="fsh-title">Available to Stream</h2>
+                  <span class="fsh-count" id="streaming-count"></span>
+                </div>
+                <div class="streaming-providers" id="streaming-providers"></div>
+              </div>
+              <div class="filmography-row" id="streaming-films"></div>
+            </div>
+
+            <!-- Full filmography -->
+            <div class="filmography-section" id="section-all">
+              <div class="filmography-section-header">
+                <div class="fsh-left">
+                  <div class="fsh-dot all"></div>
+                  <h2 class="fsh-title">Full Filmography</h2>
+                  <span class="fsh-count" id="all-count"></span>
+                </div>
+                <div class="filmography-filters" id="static-filt-btns" style="display:none">
+                </div>
+              </div>
+              <div class="filmography-row" id="all-films"></div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- Loading state -->
+        <div class="actor-loading" id="actor-loading" style="display:none">
+          <div class="spinner"></div>
+          <span id="actor-loading-msg">Searching…</span>
+        </div>
+      </div>
+
+
+      <!-- ─── TMDB Title Search View ──────────────────────── -->
+      <div class="view" id="view-titlesearch">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <button class="back-btn" id="titlesearch-back-btn" title="Back">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+              Back
+            </button>
+          </div>
+        </div>
+        <div class="titlesearch-wrap" id="titlesearch-wrap">
+          <div class="titlesearch-results" id="titlesearch-results"></div>
+        </div>
+        <div class="actor-loading" id="titlesearch-loading" style="display:none">
+          <div class="spinner"></div>
+          <span id="titlesearch-loading-msg">Searching…</span>
+        </div>
+      </div>
+
+      <!-- Watchlist View -->
+      <div class="view" id="view-watchlist">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <h1 class="view-title">My List</h1>
+            <span class="view-count" id="watchlist-count">0 items</span>
+          </div>
+          <div class="toolbar-right">
+            <button class="btn-secondary" id="watchlist-check-streaming" style="font-size:11px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              Check Streaming
+            </button>
+          </div>
+        </div>
+        <!-- Search bar -->
+        <div class="watchlist-search-bar" id="watchlist-search-bar">
+          <div class="wl-search-input-wrap" style="position:relative;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--t2);pointer-events:none;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="wl-search-input" placeholder="Search to add titles or people…" autocomplete="off">
+            <div class="wl-dropdown" id="wl-dropdown" style="display:none;"></div>
+          </div>
+          <div class="wl-search-mode">
+            <button class="wl-mode-btn active" data-mode="titles" id="wl-mode-titles">Titles</button>
+            <button class="wl-mode-btn" data-mode="people" id="wl-mode-people">People</button>
+          </div>
+        </div>
+        <!-- Full results (Enter key) -->
+        <div id="wl-full-results" style="display:none;"></div>
+        <div class="watchlist-content" id="watchlist-content"></div>
+      </div>
+
+    </main>
+  </div><!-- #app -->
+
+  <!--
+    Detail overlay and panel are OUTSIDE #app.
+    #app must NOT have overflow:hidden — that traps fixed children.
+    These elements use position:fixed relative to the viewport.
+  -->
+  <div class="detail-overlay" id="detail-overlay"></div>
+
+  <aside class="detail-panel" id="detail-panel">
+    <div class="detail-scroll" id="detail-scroll">
+
+      <!-- Poster — full width, close button floats over it -->
+      <div class="detail-poster-wrap">
+        <button class="detail-close-btn" id="detail-close" title="Close panel">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+        <img class="detail-poster" id="detail-poster" src="" alt="">
+        <div class="detail-poster-placeholder" id="detail-poster-placeholder">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 2v20M17 2v20M2 12h20"/></svg>
+        </div>
+      </div>
+
+      <div class="detail-body">
+        <div class="detail-badges" id="detail-badges"></div>
+        <h2 class="detail-title" id="detail-title"></h2>
+        <div class="detail-episode-label" id="detail-episode"></div>
+        <div class="detail-ratings" id="detail-ratings"></div>
+        <p class="detail-overview" id="detail-overview"></p>
+        <div id="detail-streaming-banner"></div>
+
+        <div class="detail-ep-box" id="detail-episode-info" style="display:none">
+          <h4 class="detail-ep-title" id="detail-ep-title"></h4>
+          <p class="detail-ep-body" id="detail-ep-overview"></p>
+        </div>
+
+        <div class="detail-actions">
+          <button class="btn-primary btn-play" id="detail-play">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M5 3l14 9-14 9V3z"/></svg>
+            Play
+          </button>
+          <button class="btn-secondary" id="detail-reveal">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            Show in Folder
+          </button>
+          <button class="btn-secondary" id="detail-hide-item" title="Hide this item from library">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            Hide
+          </button>
+          <button class="btn-icon" id="detail-remap" title="Remap to correct title">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          </button>
+          <button class="btn-icon" id="detail-fetch-meta" title="Refresh metadata">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          </button>
+        </div>
+
+        <div class="detail-info-grid" id="detail-info-grid"></div>
+
+        <!-- Remap panel — shown when user clicks the remap button -->
+        <div class="remap-panel" id="remap-panel" style="display:none">
+          <div class="remap-header">
+            <span class="remap-title">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              Remap Title
+            </span>
+            <button class="remap-close" id="remap-close">×</button>
+          </div>
+          <p class="remap-hint">Enter a title, a TMDB URL, or a TMDB ID to re-identify this file.</p>
+          <div class="remap-examples">
+            Examples: <code>Alien 1979</code> · <code>themoviedb.org/movie/348</code> · <code>tmdb:348</code>
+          </div>
+          <div class="remap-input-row">
+            <input type="text" id="remap-input" class="remap-input" placeholder="Title, TMDB URL or ID…" autocomplete="off">
+            <button class="btn-primary" id="remap-search-btn" style="margin-top:0;padding:8px 14px">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              Search
+            </button>
+          </div>
+          <!-- Search results appear here -->
+          <div class="remap-results" id="remap-results"></div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="detail-loading" id="detail-loading" style="display:none">
+      <div class="spinner"></div>
+      <span>Fetching metadata…</span>
+    </div>
+  </aside>
+
+  <div class="toast-container" id="toast-container"></div>
+  <!-- Cinematic detail overlay -->
+  <div id="cinematic-overlay" style="display:none;position:fixed;inset:0;z-index:1500;overflow-y:auto;background:#000;">
+    <div id="cinematic-inner" style="min-height:100vh;position:relative;"></div>
+  </div>
+
+  <!-- First-launch welcome modal -->
+  <div id="welcome-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:2000;align-items:center;justify-content:center;backdrop-filter:blur(8px);">
+    <div id="welcome-modal" style="background:var(--bg-1);border:1px solid var(--border-mid);border-radius:16px;padding:36px;max-width:480px;width:90%;display:flex;flex-direction:column;gap:20px;">
+      <div style="font-size:28px;font-weight:900;letter-spacing:-.03em;color:var(--t0);">Welcome to MediaVault</div>
+      <p style="font-size:14px;color:var(--t1);line-height:1.7;">To show streaming availability for your region, please enter your two-letter country code.</p>
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <label style="font-size:12px;font-weight:600;color:var(--t2);letter-spacing:.04em;text-transform:uppercase;">Country Code</label>
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="welcome-country" maxlength="2" placeholder="e.g. EE, GB, US, DE" style="flex:1;padding:10px 14px;background:var(--bg-3);border:1px solid var(--border-mid);border-radius:var(--radius-sm);color:var(--t0);font-size:14px;font-family:inherit;text-transform:uppercase;outline:none;">
+        </div>
+        <span style="font-size:11px;color:var(--t2);">EE = Estonia · GB = United Kingdom · US = United States · DE = Germany · FI = Finland</span>
+      </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;">
+        <button id="welcome-skip" style="padding:9px 18px;background:var(--bg-3);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;font-family:inherit;">Skip for now</button>
+        <button id="welcome-save" style="padding:9px 22px;background:var(--accent);border:none;border-radius:var(--radius-sm);color:#fff;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;">Get Started</button>
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
