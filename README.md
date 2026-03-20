@@ -43,7 +43,7 @@ npm run build
 Output:
 ```
 dist/
-  MediaVault-Setup-1.0.0.exe
+  MediaVault-Setup-1.1.3.exe
 ```
 
 ### Step 4 — Install
