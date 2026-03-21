@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveLibrary:      (lib)                               => ipcRenderer.invoke('save-library', lib),
   loadLibrary:      ()                                  => ipcRenderer.invoke('load-library'),
   openFile:         (p)                                 => ipcRenderer.invoke('open-file', p),
+  clearItemCache:   (ids)                                => ipcRenderer.invoke('clear-item-cache', ids),
   checkFilesExist:  (data)                               => ipcRenderer.invoke('check-files-exist', data),
   saveFile:         (opts)                               => ipcRenderer.invoke('save-file', opts),
   readFile:         (opts)                               => ipcRenderer.invoke('read-file', opts),

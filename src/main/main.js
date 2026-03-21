@@ -299,12 +299,23 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
 
       if (epInfo) {
         // ── TV episode ────────────────────────────────────────
-        // Extract show title from filename first, fall back to parent folder name
+        // Extract show title from filename first
         let showTitle = extractShowTitle(entry.name);
         if (!showTitle) {
-          // Use the parent folder name, stripping season/quality tags
-          showTitle = extractShowTitle(path.basename(dirPath)) ||
-                      cleanTitle(path.basename(dirPath));
+          const dirBase = path.basename(dirPath);
+          // If the parent folder looks like a season folder, go up one more level
+          const isSeasonDir =
+            /^season[\s._-]?\d+/i.test(dirBase) ||
+            /^s\d{1,2}(\b|[\s._-]|$)/i.test(dirBase) ||
+            /\bseason[\s._-]?\d+/i.test(dirBase) ||
+            /\bs\d{1,2}\b/i.test(dirBase);
+          if (isSeasonDir) {
+            // Use the grandparent folder as the show name
+            const grandparent = path.basename(path.dirname(dirPath));
+            showTitle = extractShowTitle(grandparent) || cleanTitle(grandparent);
+          } else {
+            showTitle = extractShowTitle(dirBase) || cleanTitle(dirBase);
+          }
         }
         if (!showTitle) showTitle = 'Unknown Show';
 
@@ -450,6 +461,21 @@ ipcMain.handle('read-file', async (event, { filters }) => {
   } catch (e) {
     return { ok: false, error: e.message };
   }
+});
+
+ipcMain.handle('clear-item-cache', async (event, ids) => {
+  // Delete cached metadata and poster files for the given item IDs
+  try {
+    const files = fs.readdirSync(CACHE_DIR);
+    for (const id of (ids || [])) {
+      const safeId = (id || '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 40);
+      const prefix = `id_${safeId}`;
+      files.filter(f => f.startsWith(prefix)).forEach(f => {
+        try { fs.unlinkSync(path.join(CACHE_DIR, f)); } catch {}
+      });
+    }
+  } catch {}
+  return { ok: true };
 });
 
 ipcMain.handle('check-files-exist', async (event, { movies, tvShows }) => {

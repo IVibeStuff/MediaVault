@@ -102,6 +102,7 @@ async function init() {
         state.watchlistVisited = true;
         renderWatchlist();
         if (state.settings.tmdbKey) checkWatchlistStreaming(false);
+        if (state.settings.tmdbKey) checkWatchlistNewSeasons(false);
         initWatchlistSearch();
       }
     }));
@@ -110,7 +111,10 @@ async function init() {
   // Scan
   document.getElementById('scan-btn').addEventListener('click', handleAddFolder);
   document.getElementById('rescan-btn').addEventListener('click', () => handleRescan(false));
-  document.getElementById('watchlist-check-streaming')?.addEventListener('click', () => checkWatchlistStreaming(true));
+  document.getElementById('watchlist-check-streaming')?.addEventListener('click', async () => {
+    await checkWatchlistStreaming(true);
+    await checkWatchlistNewSeasons(true);
+  });
   document.getElementById('empty-scan-btn').addEventListener('click', handleAddFolder);
 
   // Toolbar
@@ -229,6 +233,10 @@ async function loadLibraryData() {
     state.settings.excludedFolders = state.excludedFolders;
     if (saved.subscribedServices) state.settings.subscribedServices = saved.subscribedServices;
     state.watchlist = saved.watchlist || [];
+    // Restore full settings from library.json (more reliable than localStorage in Electron)
+    if (saved.settings) {
+      Object.assign(state.settings, saved.settings);
+    }
 
     state.library.forEach(f  => { if (f.metadata) state.metadataFetched.add(f.id); });
     state.tvShows.forEach(tv => { if (tv.metadata) state.metadataFetched.add(tv.id); });
@@ -248,9 +256,36 @@ async function loadLibraryData() {
     showWelcomeModal();
   }
 
+  // Re-evaluate existing library entries against junk filter
+  // Catches files added before junk detection was improved
+  if (state.library.length > 0) {
+    const DEFAULT_JUNK_KW = ['sample','trailer','teaser','featurette','behind.the.scenes',
+      'deleted.scene','interview','making.of','extra','bonus','short','readme','nfo'];
+    const junkKw = [...DEFAULT_JUNK_KW, ...(state.settings.junkKeywords || [])];
+    const minSizeMb = state.settings.minFileSizeMb != null ? state.settings.minFileSizeMb : 50;
+    const before = state.library.length;
+    state.library = state.library.filter(item => {
+      const fname = (item.filename || item.path || '').toLowerCase();
+      const fpath = (item.path || '').toLowerCase().replace(/\\/g, '/');
+      const check = fname + '|' + fpath;
+      if (junkKw.some(k => check.includes(k.toLowerCase()))) return false;
+      if (minSizeMb > 0 && item.size && item.size < minSizeMb * 1024 * 1024) return false;
+      return true;
+    });
+    if (state.library.length < before) {
+      console.log(`[Junk cleanup] Removed ${before - state.library.length} junk entries`);
+      saveLibrary();
+    }
+  }
+
   // Auto-rescan on startup — finds new files without touching existing metadata
   if (state.folders.length > 0) {
     setTimeout(() => handleRescan(true), 1500);
+  }
+
+  // Check for new/upcoming seasons on watchlist TV shows
+  if (state.watchlist.some(w => w.mediaType === 'tv') && state.settings.tmdbKey) {
+    setTimeout(() => checkWatchlistNewSeasons(true), 3000);
   }
 }
 
@@ -702,11 +737,7 @@ function buildGridCard(item, idx) {
     }
   }
 
-  // Status dot
-  const dot = document.createElement('div');
-  const dotColors = { pending:'var(--t2)', loading:'var(--accent)', done:'var(--green)', error:'var(--red)' };
-  dot.style.cssText = `position:absolute; bottom:8px; left:8px; width:6px; height:6px; border-radius:50%; background:${dotColors[item.status||'pending']||dotColors.pending};`;
-  poster.appendChild(dot);
+  // Status dot removed — metadata state is obvious from poster/rating presence
 
   // ── Info strip ────────────────────────────────────────
   const info = document.createElement('div');
@@ -759,7 +790,15 @@ function buildGridCard(item, idx) {
       openDetail(item);
     }
   });
-  play.addEventListener('click', e => { e.stopPropagation(); api.openFile(item.path); });
+  play.addEventListener('click', e => {
+    e.stopPropagation();
+    if (item.type === 'tv') {
+      // TV shows: open the detail panel (folder access is in the detail panel already)
+      openDetail(item);
+    } else {
+      api.openFile(item.path);
+    }
+  });
 
 
 
@@ -1394,9 +1433,13 @@ function saveLibrary() {
     excludedFolders: state.excludedFolders,
     subscribedServices: state.settings.subscribedServices,
     watchlist: state.watchlist,
+    settings: state.settings, // persist ALL settings to library.json
   });
 }
-function saveSettings() { localStorage.setItem('mv_s3', JSON.stringify(state.settings)); }
+function saveSettings() {
+  localStorage.setItem('mv_s3', JSON.stringify(state.settings)); // keep for backwards compat
+  saveLibrary(); // also persist to library.json for reliable cross-restart storage
+}
 function loadSettings() {
   try {
     const s = localStorage.getItem('mv_s3') || localStorage.getItem('mv_settings_v2') || localStorage.getItem('mv_settings');
@@ -2000,15 +2043,31 @@ async function applyRemap(result) {
       const activeId = state.activeItem.id;
 
       state.library = state.library.filter(f => {
-        if (f.id === activeId) return true; // always keep the remapped item
+        if (f.id === activeId) return true;
         if (remappedTmdbId && String(f.metadata?.tmdbId) === String(remappedTmdbId)) return false;
         if (remappedPath && (f.path || '').toLowerCase() === remappedPath) return false;
         return true;
       });
+
+      // TV shows: merge episodes from duplicates instead of dropping them
+      const activeShow = state.tvShows.find(s => s.id === activeId);
       state.tvShows = state.tvShows.filter(s => {
         if (s.id === activeId) return true;
-        if (remappedTmdbId && String(s.metadata?.tmdbId) === String(remappedTmdbId)) return false;
-        if (remappedPath && (s.path || '').toLowerCase() === remappedPath) return false;
+        const sameTmdb = remappedTmdbId && String(s.metadata?.tmdbId) === String(remappedTmdbId);
+        const samePath = remappedPath && (s.path || '').toLowerCase() === remappedPath;
+        if ((sameTmdb || samePath) && activeShow) {
+          // Merge this show's episodes into the surviving entry
+          const existingPaths = new Set((activeShow.episodes || []).map(e => e.path));
+          const newEps = (s.episodes || []).filter(e => !existingPaths.has(e.path));
+          if (newEps.length) {
+            activeShow.episodes = [...(activeShow.episodes || []), ...newEps]
+              .sort((a, b) => (a.season * 10000 + a.episode) - (b.season * 10000 + b.episode));
+            activeShow.episodeCount = activeShow.episodes.length;
+            const seasons = new Set(activeShow.episodes.map(e => e.season));
+            activeShow.seasonCount = seasons.size;
+          }
+          return false; // remove the duplicate
+        }
         return true;
       });
 
@@ -2104,6 +2163,10 @@ function updateSelectionBar() {
     bar.innerHTML = `
       <span id="sel-count-label" style="font-size:13px;font-weight:600;color:var(--t0,#f0f0f8);white-space:nowrap;"></span>
       <div style="width:1px;height:20px;background:var(--border-mid,rgba(255,255,255,0.13));flex-shrink:0;"></div>
+      <button id="sel-reset-btn" style="display:flex;align-items:center;gap:6px;padding:7px 14px;background:rgba(124,92,252,0.15);color:var(--accent,#7c5cf8);border:1px solid rgba(124,92,252,0.3);border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:background 0.15s,color 0.15s;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.5"/></svg>
+        Reset Selected
+      </button>
       <button id="sel-hide-btn" style="display:flex;align-items:center;gap:6px;padding:7px 14px;background:var(--red-soft,rgba(255,85,102,0.15));color:var(--red,#ff5566);border:1px solid rgba(255,85,102,0.3);border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:background 0.15s,color 0.15s;">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
         Hide Selected
@@ -2115,10 +2178,14 @@ function updateSelectionBar() {
 
     document.body.appendChild(bar);
 
+    document.getElementById('sel-reset-btn').addEventListener('click', () => resetItems([...state.selectedItems]));
     document.getElementById('sel-hide-btn').addEventListener('click', hideSelected);
     document.getElementById('sel-clear-btn').addEventListener('click', clearSelection);
 
     // Hover styles via JS
+    const resetBtn = document.getElementById('sel-reset-btn');
+    resetBtn.addEventListener('mouseenter', () => { resetBtn.style.background='var(--accent,#7c5cf8)'; resetBtn.style.color='#fff'; });
+    resetBtn.addEventListener('mouseleave', () => { resetBtn.style.background='rgba(124,92,252,0.15)'; resetBtn.style.color='var(--accent,#7c5cf8)'; });
     const hideBtn = document.getElementById('sel-hide-btn');
     hideBtn.addEventListener('mouseenter', () => { hideBtn.style.background='var(--red,#ff5566)'; hideBtn.style.color='#fff'; });
     hideBtn.addEventListener('mouseleave', () => { hideBtn.style.background='var(--red-soft,rgba(255,85,102,0.15))'; hideBtn.style.color='var(--red,#ff5566)'; });
@@ -2731,13 +2798,15 @@ function buildEpisodeCard(localEp, tmdbEp, onWatchedToggle) {
   checkBadge.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#4cde8a" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>`;
   stillWrap.appendChild(checkBadge);
 
-  // Play button overlay on still
+  // Play button overlay on still — only shown when there's a local file to play
   const playOverlay = document.createElement('div');
   playOverlay.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.4);opacity:0;transition:opacity 0.16s;border-radius:6px;';
   playOverlay.innerHTML = `<div style="width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.9);display:flex;align-items:center;justify-content:center;"><svg width="12" height="12" viewBox="0 0 24 24" fill="#111"><path d="M5 3l14 9-14 9V3z"/></svg></div>`;
-  stillWrap.appendChild(playOverlay);
-  card.addEventListener('mouseenter', () => playOverlay.style.opacity = '1');
-  card.addEventListener('mouseleave', () => playOverlay.style.opacity = '0');
+  if (localEp.path) {
+    stillWrap.appendChild(playOverlay);
+    card.addEventListener('mouseenter', () => playOverlay.style.opacity = '1');
+    card.addEventListener('mouseleave', () => playOverlay.style.opacity = '0');
+  }
 
   card.appendChild(stillWrap);
 
@@ -2789,10 +2858,10 @@ function buildEpisodeCard(localEp, tmdbEp, onWatchedToggle) {
     saveLibrary();
   });
 
-  // Click card body to play
+  // Click card body to play — only if there's a local file
   card.addEventListener('click', e => {
     if (e.target === watchBtn || watchBtn.contains(e.target)) return;
-    api.openFile(localEp.path);
+    if (localEp.path) api.openFile(localEp.path);
   });
 
   return card;
@@ -2928,6 +2997,11 @@ function cinFloatingToolbar(item) {
     '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>',
     'Hide from library',
     () => { closeDetailedOverlay(); hideItem(item); }
+  ));
+  panel.appendChild(makeAction(
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.5"/></svg>',
+    'Reset entry',
+    () => { closeDetailedOverlay(); resetItems([item.id]); }
   ));
 
   let panelOpen = false;
@@ -3552,9 +3626,25 @@ function renderWatchlist() {
   const wantToWatch = state.watchlist.filter(w => !w.watched);
   const watched     = state.watchlist.filter(w => w.watched);
 
+  // ── New / Upcoming seasons section ───────────────────
+  const newSeasonItems = state.watchlist.filter(w =>
+    w.mediaType === 'tv' && w.newSeasonInfo && !w.newSeasonInfo.dismissed
+  );
+  if (newSeasonItems.length) {
+    const sec = document.createElement('div');
+    sec.innerHTML = `<div class="watchlist-section-title" style="color:#4cde8a;">🆕 New & Upcoming Seasons · ${newSeasonItems.length} show${newSeasonItems.length!==1?'s':''}</div>`;
+    const grid = document.createElement('div');
+    grid.className = 'watchlist-grid';
+    newSeasonItems.forEach(item => grid.appendChild(buildWatchlistCard(item)));
+    sec.appendChild(grid);
+    container.appendChild(sec);
+  }
+
   if (wantToWatch.length) {
+    // Exclude items already shown in New Seasons section
+    const newSeasonIds = new Set(newSeasonItems.map(w => w.tmdbId));
     const movies = wantToWatch.filter(w => w.mediaType === 'movie');
-    const shows  = wantToWatch.filter(w => w.mediaType === 'tv');
+    const shows  = wantToWatch.filter(w => w.mediaType === 'tv' && !newSeasonIds.has(w.tmdbId));
 
     function addWatchSection(items, label) {
       if (!items.length) return;
@@ -3567,12 +3657,13 @@ function renderWatchlist() {
       container.appendChild(sec);
     }
 
-    // Show separate sections if both types exist, otherwise one combined section
     if (movies.length && shows.length) {
       addWatchSection(movies, 'Movies · Want to Watch');
       addWatchSection(shows, 'TV Shows · Want to Watch');
-    } else {
-      addWatchSection(wantToWatch, 'Want to Watch');
+    } else if (movies.length) {
+      addWatchSection(movies, 'Want to Watch');
+    } else if (shows.length) {
+      addWatchSection(shows, 'TV Shows · Want to Watch');
     }
   }
 
@@ -3646,6 +3737,7 @@ function buildWatchlistCard(item) {
         <span style="font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;background:var(--accent-soft);color:var(--text-accent);border:1px solid rgba(124,92,252,.2);">${typeLabel}</span>
         ${item.year ? `<span style="font-size:10px;color:var(--t2);font-family:'DM Mono',monospace;">${item.year}</span>` : ''}
         ${item.watched ? `<span style="font-size:10px;font-weight:700;color:#4cde8a;">✓ Watched</span>` : ''}
+        ${item.newSeasonInfo && !item.newSeasonInfo.dismissed ? `<span style="font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;background:rgba(76,222,138,.15);color:#4cde8a;border:1px solid rgba(76,222,138,.3);">${item.newSeasonInfo.label}</span>` : ''}
       </div>
       <div class="watchlist-title">${esc(item.title)}</div>
       <div class="watchlist-overview">${esc(item.overview || 'No description available.')}</div>
@@ -4731,4 +4823,159 @@ async function pruneDeletedFiles(silent = false) {
     console.warn('[pruneDeletedFiles]', e);
   }
   return result;
+}
+
+// ═══════════════════════════════════════════════════════
+// NEW SEASON DETECTION
+// ═══════════════════════════════════════════════════════
+
+async function checkWatchlistNewSeasons(showToast = false) {
+  if (!state.settings.tmdbKey) return;
+  const tvShows = state.watchlist.filter(w => w.mediaType === 'tv');
+  if (!tvShows.length) return;
+
+  const now     = new Date();
+  const past30  = new Date(now); past30.setDate(now.getDate() - 30);
+  const future90 = new Date(now); future90.setDate(now.getDate() + 90);
+
+  let newCount = 0;
+  let changed  = false;
+
+  for (const item of tvShows) {
+    try {
+      const resp = await fetch(
+        `https://api.themoviedb.org/3/tv/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+      );
+      if (!resp.ok) continue;
+      const data = await resp.json();
+
+      // Find the latest season (ignore specials — season 0)
+      const seasons = (data.seasons || []).filter(s => s.season_number > 0);
+      if (!seasons.length) continue;
+      const latest = seasons[seasons.length - 1];
+      const airDate = latest.air_date ? new Date(latest.air_date) : null;
+
+      if (!airDate) continue;
+
+      // Check if this is a new or upcoming season relative to our last check
+      const isNew      = airDate >= past30   && airDate <= now;
+      const isUpcoming = airDate > now       && airDate <= future90;
+
+      if (isNew || isUpcoming) {
+        const dateStr = airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
+        const label   = isNew
+          ? `🆕 S${latest.season_number} — aired ${dateStr}`
+          : `📅 S${latest.season_number} — ${dateStr}`;
+
+        // Only flag if this is a different season from what we last recorded
+        const prev = item.newSeasonInfo;
+        if (!prev || prev.season !== latest.season_number || prev.dismissed) {
+          item.newSeasonInfo = {
+            season:    latest.season_number,
+            airDate:   latest.air_date,
+            label,
+            isNew,
+            isUpcoming,
+            dismissed: false,
+          };
+          // If the item was in Watched, un-watch it so it bubbles up
+          if (item.watched) {
+            item.watched = false;
+          }
+          newCount++;
+          changed = true;
+        }
+      } else {
+        // Season is older than 30 days and no upcoming — clear any stale flag
+        if (item.newSeasonInfo && !item.newSeasonInfo.dismissed) {
+          item.newSeasonInfo = null;
+          changed = true;
+        }
+      }
+
+      // Rate limit — be gentle with TMDB
+      await new Promise(r => setTimeout(r, 150));
+    } catch {}
+  }
+
+  if (changed) {
+    saveLibrary();
+    renderWatchlist();
+  }
+
+  if (showToast && newCount > 0) {
+    const names = state.watchlist
+      .filter(w => w.newSeasonInfo && !w.newSeasonInfo.dismissed)
+      .map(w => w.title)
+      .slice(0, 3)
+      .join(', ');
+    showToast(
+      `${newCount} show${newCount!==1?'s have':' has'} new or upcoming seasons — ${names}`,
+      'success'
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// RESET ITEMS — clear metadata and re-fetch fresh
+// ═══════════════════════════════════════════════════════
+
+async function resetItems(ids) {
+  if (!ids || !ids.length) return;
+
+  const count = ids.length;
+  const label = count === 1 ? '1 item' : `${count} items`;
+
+  if (!confirm(`Reset ${label}? This clears all metadata and mappings. The ${count === 1 ? 'item' : 'items'} will be re-fetched fresh.`)) return;
+
+  // Clear metadata from all matched items
+  ids.forEach(id => {
+    // Movies
+    const movie = state.library.find(f => f.id === id);
+    if (movie) {
+      movie.metadata    = null;
+      movie.posterPath  = null;
+      movie.status      = 'pending';
+      movie.title       = movie.displayTitle = cleanDisplayTitle(movie.filename || movie.path);
+      state.metadataFetched.delete(id);
+    }
+    // TV shows
+    const show = state.tvShows.find(s => s.id === id);
+    if (show) {
+      show.metadata    = null;
+      show.posterPath  = null;
+      show.status      = 'pending';
+      show.title       = show.displayTitle = cleanDisplayTitle(show.filename || show.title);
+      state.metadataFetched.delete(id);
+    }
+  });
+
+  clearSelection();
+  applyFiltersAndSort();
+  updateStats();
+  saveLibrary();
+  showToast(`${label} reset — re-fetching…`, 'info');
+
+  // Delete cached files for these items via main process
+  // (best effort — no error if cache file doesn't exist)
+  try { await api.clearItemCache(ids); } catch {}
+
+  // Queue re-fetch for all reset items — run as a batch so dedup fires after all complete
+  if (state.settings.tmdbKey || state.settings.omdbKey) {
+    const toFetch = [
+      ...state.library.filter(f => ids.includes(f.id)),
+      ...state.tvShows.filter(s => ids.includes(s.id)),
+    ];
+    // Small delay so UI updates first
+    setTimeout(() => {
+      state.fetchQueue.push(...toFetch);
+      processFetchQueue();
+    }, 300);
+  }
+}
+
+function cleanDisplayTitle(raw) {
+  if (!raw) return 'Unknown';
+  // Strip extension and clean up filename into a readable title
+  return (raw.replace(/\.[^/.]+$/, '').replace(/[._\-]+/g, ' ').trim()) || 'Unknown';
 }
