@@ -487,55 +487,123 @@ body.platform-darwin .titlebar-left { padding-left: 60px; }
 /* Poster */
 .detail-poster-wrap {
   width: 100%;
-  aspect-ratio: 2/3;
-  max-height: 400px;
+  height: 200px;
   background: var(--bg-3);
   position: relative;
   overflow: hidden;
   flex-shrink: 0;
+}
+.detail-poster-gradient {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent 40%, var(--bg-1) 100%);
+  pointer-events: none;
 }
 .detail-close-btn {
   position: absolute;
   top: 12px;
   right: 12px;
   z-index: 10;
-  width: 30px; height: 30px;
+  width: 28px; height: 28px;
   border-radius: 50%;
-  background: rgba(0,0,0,.6);
-  backdrop-filter: blur(8px);
-  border: 1px solid rgba(255,255,255,.25);
+  background: rgba(0,0,0,.55);
+  border: 1px solid rgba(255,255,255,.2);
   display: flex; align-items: center; justify-content: center;
   color: rgba(255,255,255,.9);
   cursor: pointer;
   transition: background var(--transition), transform var(--transition);
 }
-.detail-close-btn:hover { background: rgba(0,0,0,.85); transform: scale(1.1); }
+.detail-close-btn:hover { background: rgba(0,0,0,.85); transform: scale(1.08); }
 .detail-poster { width:100%; height:100%; object-fit:cover; object-position:center top; display:none; }
 .detail-poster.loaded { display:block; }
 .detail-poster-placeholder { width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:var(--t2); }
 
 /* Detail body */
-.detail-body { padding: 18px 20px 24px; }
-.detail-badges { display:flex; gap:5px; flex-wrap:wrap; margin-bottom:10px; }
+.detail-body { padding: 14px 18px 24px; display:flex; flex-direction:column; gap:12px; }
+.detail-badges { display:flex; gap:5px; flex-wrap:wrap; }
 .badge { font-size:9.5px; font-weight:700; letter-spacing:.05em; padding:2px 7px; border-radius:4px; text-transform:uppercase; }
 .badge-movie  { background:var(--accent-soft); color:var(--text-accent); }
 .badge-tv     { background:rgba(76,222,138,.15); color:var(--green); }
 .badge-year   { background:var(--bg-3); color:var(--t1); border:1px solid var(--border); }
 .badge-rated  { background:var(--bg-3); color:var(--t2); border:1px solid var(--border); }
 .badge-genre  { background:var(--bg-3); color:var(--t1); border:1px solid var(--border); }
-.detail-title { font-size:19px; font-weight:700; letter-spacing:-.02em; line-height:1.2; margin-bottom:5px; }
-.detail-episode-label { font-size:12px; color:var(--t2); font-family:'DM Mono',monospace; margin-bottom:12px; }
-.detail-ratings { display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap; }
-.detail-overview { font-size:13px; color:var(--t1); line-height:1.7; margin-bottom:14px; }
-.detail-ep-box { background:var(--bg-3); border:1px solid var(--border); border-radius:var(--radius-sm); padding:13px; margin-bottom:14px; }
-.detail-ep-title { font-size:13px; font-weight:600; margin-bottom:5px; }
-.detail-ep-body { font-size:12px; color:var(--t1); line-height:1.6; }
-.detail-info-grid { display:block; margin-bottom:16px; }
+.detail-title { font-size:20px; font-weight:700; letter-spacing:-.02em; line-height:1.2; margin:0; }
+.detail-episode-label { font-size:11px; color:var(--t2); font-family:'DM Mono',monospace; margin:0; }
+.detail-meta-row { display:flex; align-items:flex-start; gap:10px; flex-wrap:wrap; }
+.detail-ratings { display:flex; gap:8px; flex-wrap:wrap; }
+.detail-overview { font-size:12px; color:var(--t1); line-height:1.7; margin:0; display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
+.detail-actions { display:flex; gap:8px; align-items:center; }
+/* Play — full label button, accent coloured */
+.detail-action-play {
+  display:inline-flex; align-items:center; gap:7px;
+  padding:9px 18px; border-radius:var(--radius-sm);
+  background:var(--accent); color:#fff; border:none;
+  font-size:13px; font-weight:600; cursor:pointer; font-family:inherit;
+  transition:background var(--transition), opacity var(--transition);
+  white-space:nowrap;
+}
+.detail-action-play:hover { background:var(--accent-hover,#6a4de0); }
+/* Icon-only buttons — borderless, subtle */
+.detail-action-icon {
+  display:inline-flex; align-items:center; justify-content:center;
+  width:34px; height:34px; border-radius:var(--radius-sm);
+  background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1);
+  color:var(--t1); cursor:pointer; transition:background var(--transition), color var(--transition);
+  flex-shrink:0;
+}
+.detail-action-icon:hover { background:rgba(255,255,255,.13); color:var(--t0); }
+.detail-action-hide { color:var(--red) !important; border-color:rgba(255,85,102,.25) !important; background:rgba(255,85,102,.07) !important; }
+.detail-action-hide:hover { background:rgba(255,85,102,.18) !important; }
+.detail-options-wrap { position:relative; }
+
+/* Options dropdown */
+.detail-options-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border-mid);
+  border-radius: 10px;
+  padding: 5px;
+  min-width: 170px;
+  z-index: 50;
+  box-shadow: 0 8px 24px rgba(0,0,0,.4);
+}
+.detail-options-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 8px 10px;
+  background: none; border: none; border-radius: 6px;
+  font-size: 12px; font-weight: 500; color: var(--t1);
+  cursor: pointer; font-family: inherit; text-align: left;
+  transition: background var(--transition), color var(--transition);
+}
+.detail-options-item:hover { background: var(--bg-3); color: var(--t0); }
+.detail-options-danger { color: var(--red) !important; }
+.detail-options-danger:hover { background: rgba(255,85,102,.12) !important; }
+.detail-options-divider { height: 1px; background: var(--border); margin: 4px 0; }
+
+/* Divider */
+.detail-divider { height: 1px; background: var(--border); }
+
+/* File info */
+.detail-fileinfo { display:flex; flex-direction:column; gap:0; }
+.detail-fileinfo-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--t2); background: none; border: none; cursor: pointer;
+  padding: 2px 0; font-family: inherit; transition: color var(--transition);
+}
+.detail-fileinfo-toggle:hover { color: var(--t1); }
+.detail-fileinfo-rows { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+.detail-fileinfo-row { display: flex; gap: 10px; font-size: 11px; }
+.detail-fileinfo-label { color: var(--t2); font-weight: 600; min-width: 64px; flex-shrink: 0; }
+.detail-fileinfo-value { color: var(--t1); font-family: 'DM Mono', monospace; font-size: 10px; word-break: break-all; }
+
+.detail-ep-box { background:var(--bg-3); border:1px solid var(--border); border-radius:var(--radius-sm); padding:13px; }
+.detail-info-grid { display:block; }
 .detail-meta-rows { display:grid; grid-template-columns:auto 1fr; gap:5px 14px; margin-top:8px; }
 .info-label { font-size:11px; color:var(--t2); font-weight:500; }
 .info-value { font-size:11px; color:var(--t1); font-family:'DM Mono',monospace; word-break:break-all; }
-.detail-actions { display:flex; gap:7px; align-items:center; flex-wrap:wrap; }
-.btn-play { flex:1; justify-content:center; min-width:90px; }
 
 /* Loading spinner */
 .detail-loading { position:absolute; inset:0; background:rgba(17,17,24,.85); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; font-size:13px; color:var(--t1); z-index:10; }
@@ -1594,3 +1662,127 @@ body.platform-darwin .titlebar-left { padding-left: 60px; }
 .toast.error   { border-left:3px solid var(--red); }
 .toast.info    { border-left:3px solid var(--accent); }
 @keyframes slideInRight { from{transform:translateX(110%);opacity:0} to{transform:translateX(0);opacity:1} }
+
+/* ═══════════════════════════════════════════════════════
+   TV GUIDE
+   ═══════════════════════════════════════════════════════ */
+
+.tvguide-content {
+  padding: 0 28px 40px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.tvguide-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 80px 0;
+  color: var(--t2);
+  text-align: center;
+}
+
+.tvguide-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--t2);
+  padding: 20px 0 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.tvguide-section-title:first-child { padding-top: 8px; }
+
+.tvguide-entry {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  margin-bottom: 4px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  transition: background var(--transition), border-color var(--transition);
+  position: relative;
+}
+
+.tvguide-entry:hover { background: var(--bg-3); border-color: var(--border-mid); }
+
+.tvguide-entry.unread { border-left: 3px solid var(--accent); }
+.tvguide-entry.aired  { border-left: 3px solid var(--green); }
+.tvguide-entry.upcoming { border-left: 3px solid rgba(255,255,255,.2); }
+
+.tvguide-entry-icon {
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  background: var(--bg-3);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.tvguide-entry-body { flex: 1; min-width: 0; }
+
+.tvguide-entry-show {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--t0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+
+.tvguide-entry-detail {
+  font-size: 11px;
+  color: var(--t2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tvguide-entry-date {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--t2);
+  font-family: 'DM Mono', monospace;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.tvguide-entry-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.tvguide-view-btn {
+  padding: 5px 10px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid rgba(124,92,248,.3);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background var(--transition);
+  white-space: nowrap;
+}
+.tvguide-view-btn:hover { background: var(--accent); color: #fff; }
+
+.tvguide-dismiss-btn {
+  width: 24px; height: 24px;
+  border-radius: 5px;
+  background: none;
+  border: none;
+  color: var(--t2);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background var(--transition), color var(--transition);
+}
+.tvguide-dismiss-btn:hover { background: var(--bg-4); color: var(--t0); }

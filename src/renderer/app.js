@@ -49,6 +49,8 @@ const state = {
   watchlist: [],
   watchlistVisited: false,
   navStack: [],
+  tvGuideNotifications: [],
+  tvGuideVisited: false,
 };
 
 // ─── Score balloon helper ───────────────────────────────
@@ -105,6 +107,11 @@ async function init() {
         if (state.settings.tmdbKey) checkWatchlistNewSeasons(false);
         initWatchlistSearch();
       }
+      if (btn.dataset.view === 'tvguide') {
+        state.tvGuideVisited = true;
+        renderTVGuide();
+        updateTVGuideBadge();
+      }
     }));
   updateWatchlistBadge();
 
@@ -114,6 +121,15 @@ async function init() {
   document.getElementById('watchlist-check-streaming')?.addEventListener('click', async () => {
     await checkWatchlistStreaming(true);
     await checkWatchlistNewSeasons(true);
+  });
+  document.getElementById('tvguide-refresh-btn')?.addEventListener('click', () => refreshTVGuide(true));
+  document.getElementById('tvguide-clear-btn')?.addEventListener('click', () => {
+    if (confirm('Clear all TV Guide notifications?')) {
+      state.tvGuideNotifications = [];
+      saveLibrary();
+      renderTVGuide();
+      updateTVGuideBadge();
+    }
   });
   document.getElementById('empty-scan-btn').addEventListener('click', handleAddFolder);
 
@@ -148,6 +164,7 @@ async function init() {
   // Detail panel
   document.getElementById('detail-close').addEventListener('click', closeDetail);
   document.getElementById('detail-overlay').addEventListener('click', closeDetail);
+
   document.getElementById('detail-play').addEventListener('click', () => {
     if (state.activeItem) api.openFile(state.activeItem.path);
   });
@@ -155,15 +172,38 @@ async function init() {
     if (state.activeItem) api.revealFile(state.activeItem.path);
   });
   document.getElementById('detail-hide-item').addEventListener('click', () => {
-    if (state.activeItem) hideItem(state.activeItem);
+    if (state.activeItem) { closeDetail(); hideItem(state.activeItem); }
+  });
+
+  // Options dropdown
+  const optBtn  = document.getElementById('detail-options-btn');
+  const optMenu = document.getElementById('detail-options-menu');
+  optBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    optMenu.style.display = optMenu.style.display === 'none' ? 'block' : 'none';
+  });
+  document.addEventListener('click', () => { optMenu.style.display = 'none'; });
+
+  document.getElementById('detail-remap').addEventListener('click', () => {
+    optMenu.style.display = 'none';
+    toggleRemapPanel(true);
   });
   document.getElementById('detail-fetch-meta').addEventListener('click', () => {
+    optMenu.style.display = 'none';
     if (state.activeItem) {
       state.metadataFetched.delete(state.activeItem.id);
       fetchMetadataForItem(state.activeItem);
     }
   });
-  document.getElementById('detail-remap').addEventListener('click', () => toggleRemapPanel(true));
+  document.getElementById('detail-reset-item').addEventListener('click', () => {
+    optMenu.style.display = 'none';
+    if (state.activeItem) { closeDetail(); resetItems([state.activeItem.id]); }
+  });
+  document.getElementById('detail-hide-option').addEventListener('click', () => {
+    optMenu.style.display = 'none';
+    if (state.activeItem) { closeDetail(); hideItem(state.activeItem); }
+  });
+
   document.getElementById('remap-close').addEventListener('click', () => toggleRemapPanel(false));
   document.getElementById('remap-search-btn').addEventListener('click', () => doRemapSearch());
   document.getElementById('remap-input').addEventListener('keydown', e => {
@@ -233,9 +273,16 @@ async function loadLibraryData() {
     state.settings.excludedFolders = state.excludedFolders;
     if (saved.subscribedServices) state.settings.subscribedServices = saved.subscribedServices;
     state.watchlist = saved.watchlist || [];
+    state.tvGuideNotifications = saved.tvGuideNotifications || [];
     // Restore full settings from library.json (more reliable than localStorage in Electron)
     if (saved.settings) {
       Object.assign(state.settings, saved.settings);
+      // Always clear discovered providers — we now use a curated list only
+      state.settings.discoveredProviders = [];
+      // Purge any subscribed services not in the curated list
+      const CURATED_IDS = [8, 119, 1899, 337, 350, 149];
+      state.settings.subscribedServices = (state.settings.subscribedServices || [])
+        .filter(id => CURATED_IDS.includes(id));
     }
 
     state.library.forEach(f  => { if (f.metadata) state.metadataFetched.add(f.id); });
@@ -287,6 +334,11 @@ async function loadLibraryData() {
   if (state.watchlist.some(w => w.mediaType === 'tv') && state.settings.tmdbKey) {
     setTimeout(() => checkWatchlistNewSeasons(true), 3000);
   }
+  // Populate TV Guide on startup
+  if (state.settings.tmdbKey) {
+    setTimeout(() => refreshTVGuide(false), 4500);
+  }
+  updateTVGuideBadge();
 }
 
 function showWelcomeModal() {
@@ -327,7 +379,7 @@ function switchView(view) {
     b.classList.toggle('active', b.dataset.view === view));
   state.currentView = view;
 
-  const map = { library:'library', movies:'library', tv:'library', settings:'settings', actor:'actor', titlesearch:'titlesearch', watchlist:'watchlist' };
+  const map = { library:'library', movies:'library', tv:'library', settings:'settings', actor:'actor', titlesearch:'titlesearch', watchlist:'watchlist', tvguide:'tvguide' };
   document.querySelectorAll('.view').forEach(v =>
     v.classList.toggle('active', v.id === `view-${map[view] || 'library'}`));
 
@@ -912,8 +964,9 @@ function renderDetailPanel(item) {
     const box = document.getElementById('detail-episode-info');
     if (item.episodes && item.episodes.length > 0) {
       box.style.display = 'block';
-      document.getElementById('detail-ep-title').textContent = '';
-      renderTVEpisodePanel(item, m, document.getElementById('detail-ep-overview'));
+      const epCont = document.getElementById('detail-ep-overview');
+      epCont.innerHTML = '';
+      renderTVEpisodePanel(item, m, epCont);
     } else {
       box.style.display = 'none';
     }
@@ -923,20 +976,34 @@ function renderDetailPanel(item) {
   }
 
   const ratings = document.getElementById('detail-ratings');
-  ratings.innerHTML = [[m.imdbRating,'IMDB'],[m.tmdbRating,'TMDB']]
-    .filter(([s]) => s)
-    .map(([s, src]) => {
-      const sm = scoreMeta(s);
-      return `<div class="detail-score-balloon" style="--bc:${sm?.color||'#888'}">
-        <span class="dsb-source">${src}</span>
-        <span class="dsb-value">${s}</span>
-        <span class="dsb-label">${sm?.label||''}</span>
-      </div>`;
-    }).join('');
+  // Show IMDB preferably, fall back to TMDB — avoid showing both
+  const ratingScore = m.imdbRating || m.tmdbRating;
+  const ratingSource = m.imdbRating ? 'IMDB' : 'TMDB';
+  if (ratingScore) {
+    const sm = scoreMeta(ratingScore);
+    ratings.innerHTML = `<div class="detail-score-balloon" style="--bc:${sm?.color||'#888'}">
+      <span class="dsb-source">${ratingSource}</span>
+      <span class="dsb-value">${ratingScore}</span>
+      <span class="dsb-label">${sm?.label||''}</span>
+    </div>`;
+  } else {
+    ratings.innerHTML = '';
+  }
 
   document.getElementById('detail-overview').textContent = m.overview || 'No description available.';
 
-  // Streaming availability banner (lazy-fetched)
+  // Show/hide Play button for TV shows (no single file to open)
+  const playBtn   = document.getElementById('detail-play');
+  const revealBtn = document.getElementById('detail-reveal');
+  if (item.type === 'tv') {
+    if (playBtn)   playBtn.style.display   = 'none';
+    if (revealBtn) revealBtn.style.display = 'flex';
+  } else {
+    if (playBtn)   playBtn.style.display   = item.path ? 'inline-flex' : 'none';
+    if (revealBtn) revealBtn.style.display = item.path ? 'flex'        : 'none';
+  }
+
+  // Streaming banner — inline next to rating
   const streamingWrap = document.getElementById('detail-streaming-banner');
   if (streamingWrap) streamingWrap.innerHTML = '';
   if (m.tmdbId && state.settings.tmdbKey) {
@@ -945,10 +1012,38 @@ function renderDetailPanel(item) {
     api.getWatchProviders(m.tmdbId, item.type === 'tv' ? 'tv' : 'movie', state.settings.tmdbKey, country)
       .then(providers => {
         const el = document.getElementById('detail-streaming-banner');
-        if (el && providers.flatrate) {
-          el.innerHTML = buildStreamingBanner(providers);
-        }
+        if (el && providers) el.innerHTML = buildStreamingBanner(providers);
       }).catch(() => {});
+  }
+
+  // File info collapsible
+  const fiSection = document.getElementById('detail-fileinfo');
+  const fiRows    = document.getElementById('detail-fileinfo-rows');
+  const fiToggle  = document.getElementById('detail-fileinfo-toggle');
+  if (fiSection && fiRows && fiToggle) {
+    const rows = [];
+    if (item.filename)  rows.push(['File',    item.filename]);
+    if (item.sizeHuman) rows.push(['Size',    item.sizeHuman]);
+    if (item.createdAt) rows.push(['Added',   new Date(item.createdAt).toLocaleDateString()]);
+    if (m.awards)       rows.push(['Awards',  m.awards]);
+    if (m.imdbId)       rows.push(['IMDB ID', m.imdbId]);
+    if (item.path)      rows.push(['Path',    item.path]);
+    if (rows.length) {
+      fiSection.style.display = 'flex';
+      fiRows.innerHTML = rows.map(([l,v]) =>
+        `<div class="detail-fileinfo-row"><span class="detail-fileinfo-label">${esc(l)}</span><span class="detail-fileinfo-value">${esc(String(v))}</span></div>`
+      ).join('');
+      const newToggle = fiToggle.cloneNode(true);
+      fiToggle.parentNode.replaceChild(newToggle, fiToggle);
+      let fiOpen = false;
+      newToggle.addEventListener('click', () => {
+        fiOpen = !fiOpen;
+        fiRows.style.display = fiOpen ? 'flex' : 'none';
+        newToggle.querySelector('svg').style.transform = fiOpen ? 'rotate(90deg)' : '';
+      });
+    } else {
+      fiSection.style.display = 'none';
+    }
   }
 
   // ── Divider + cast panel ───────────────────────────────────
@@ -1433,6 +1528,7 @@ function saveLibrary() {
     excludedFolders: state.excludedFolders,
     subscribedServices: state.settings.subscribedServices,
     watchlist: state.watchlist,
+    tvGuideNotifications: state.tvGuideNotifications,
     settings: state.settings, // persist ALL settings to library.json
   });
 }
@@ -2281,26 +2377,22 @@ function renderExcludedFolderList() {
 
 // Well-known providers with their TMDB IDs for pre-population
 const KNOWN_PROVIDERS = [
-  { id: 8,   name: 'Netflix',       logo: null },
-  { id: 119, name: 'Prime Video',   logo: null },
-  { id: 337, name: 'Disney+',       logo: null },
-  { id: 350, name: 'Apple TV+',     logo: null },
-  { id: 384, name: 'HBO Max',       logo: null },
-  { id: 15,  name: 'Hulu',          logo: null },
-  { id: 531, name: 'Paramount+',    logo: null },
-  { id: 283, name: 'Crunchyroll',   logo: null },
+  { id: 8,    name: 'Netflix',            logo: null },
+  { id: 119,  name: 'Amazon Prime Video', logo: null },
+  { id: 1899, name: 'Max',               logo: null },
+  { id: 337,  name: 'Disney+',           logo: null },
+  { id: 350,  name: 'Apple TV+',         logo: null },
+  { id: 149,  name: 'GO3',               logo: null },
 ];
+const ALLOWED_PROVIDER_IDS = new Set([8, 119, 1899, 337, 350, 149]);
 
 function renderStreamingServicesList() {
   const container = document.getElementById('streaming-services-list');
   if (!container) return;
 
-  // Merge known providers with any discovered from browsing (stored in settings)
-  const discovered = state.settings.discoveredProviders || [];
+  // Only show the curated KNOWN_PROVIDERS — clear any old discovered bloat
+  state.settings.discoveredProviders = [];
   const allProviders = [...KNOWN_PROVIDERS];
-  discovered.forEach(d => {
-    if (!allProviders.find(p => p.id === d.id)) allProviders.push(d);
-  });
 
   container.innerHTML = '';
   allProviders.forEach(provider => {
@@ -2637,13 +2729,9 @@ function renderTVEpisodePanel(item, meta, container) {
   });
   header.appendChild(select);
 
-  const epCount = document.createElement('span');
-  epCount.style.cssText = 'font-size:12px;color:var(--t2);font-family:"DM Mono",monospace;';
-  header.appendChild(epCount);
-
-  // Progress bar
+  // Progress bar — takes all remaining space
   const progressWrap = document.createElement('div');
-  progressWrap.style.cssText = 'flex:1;height:4px;background:var(--bg-4);border-radius:2px;max-width:140px;';
+  progressWrap.style.cssText = 'flex:1;height:4px;background:var(--bg-4);border-radius:2px;min-width:30px;';
   const progressBar = document.createElement('div');
   progressBar.style.cssText = 'height:4px;border-radius:2px;background:#4cde8a;width:0;transition:width 0.3s ease;';
   progressWrap.appendChild(progressBar);
@@ -2651,13 +2739,13 @@ function renderTVEpisodePanel(item, meta, container) {
 
   const progressTxt = document.createElement('span');
   progressTxt.style.cssText = 'font-size:11px;color:var(--t2);white-space:nowrap;';
-  progressTxt.textContent = '0 / 0 watched';
+  progressTxt.textContent = '0 / 0';
   header.appendChild(progressTxt);
 
-  // Mark season watched button
+  // Mark season watched button — short label to fit panel width
   const markSeasonBtn = document.createElement('button');
-  markSeasonBtn.style.cssText = 'padding:5px 10px;background:var(--bg-3);border:1px solid var(--border-mid);border-radius:var(--radius-sm);color:var(--t2);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;transition:all 0.16s;white-space:nowrap;';
-  markSeasonBtn.textContent = 'Mark season watched';
+  markSeasonBtn.style.cssText = 'padding:5px 10px;background:var(--bg-3);border:1px solid var(--border-mid);border-radius:var(--radius-sm);color:var(--t2);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;transition:all 0.16s;white-space:nowrap;flex-shrink:0;';
+  markSeasonBtn.textContent = 'Mark watched';
   markSeasonBtn.addEventListener('mouseenter', () => { markSeasonBtn.style.background='var(--bg-4)'; markSeasonBtn.style.color='var(--t0)'; });
   markSeasonBtn.addEventListener('mouseleave', () => { markSeasonBtn.style.background='var(--bg-3)'; markSeasonBtn.style.color='var(--t2)'; });
   markSeasonBtn.addEventListener('click', () => {
@@ -2689,8 +2777,8 @@ function renderTVEpisodePanel(item, meta, container) {
     const watchedCount = eps.filter(e => e.watched).length;
     const pct = eps.length ? Math.round(watchedCount / eps.length * 100) : 0;
     progressBar.style.width = pct + '%';
-    progressTxt.textContent = `${watchedCount} / ${eps.length} watched`;
-    markSeasonBtn.textContent = watchedCount === eps.length ? 'Unmark season' : 'Mark season watched';
+    progressTxt.textContent = `${watchedCount} / ${eps.length}`;
+    markSeasonBtn.textContent = watchedCount === eps.length ? 'Unmark' : 'Mark watched';
   }
 
   function renderSeason(seasonNum) {
@@ -2707,7 +2795,7 @@ function renderTVEpisodePanel(item, meta, container) {
       epList.appendChild(buildEpisodeCard(ep, tmdbEp, () => updateSeasonProgress(eps)));
     });
 
-    epCount.textContent = `${eps.length} episode${eps.length!==1?'s':''}`;
+    // episode count shown in season selector label
 
     // If we have a tmdbId but no cached data, fetch in background
     if (meta.tmdbId && !tvEpisodeCache[cacheKey] && state.settings.tmdbKey) {
@@ -3628,11 +3716,16 @@ function renderWatchlist() {
 
   // ── New / Upcoming seasons section ───────────────────
   const newSeasonItems = state.watchlist.filter(w =>
-    w.mediaType === 'tv' && w.newSeasonInfo && !w.newSeasonInfo.dismissed
+    w.newSeasonInfo && !w.newSeasonInfo.dismissed
   );
   if (newSeasonItems.length) {
     const sec = document.createElement('div');
-    sec.innerHTML = `<div class="watchlist-section-title" style="color:#4cde8a;">🆕 New & Upcoming Seasons · ${newSeasonItems.length} show${newSeasonItems.length!==1?'s':''}</div>`;
+    const tvNew    = newSeasonItems.filter(w => w.mediaType === 'tv').length;
+    const movieNew = newSeasonItems.filter(w => w.mediaType === 'movie').length;
+    const sectionLabel = tvNew && movieNew ? 'New & Upcoming'
+      : tvNew ? 'New & Upcoming Seasons'
+      : 'New & Upcoming Releases';
+    sec.innerHTML = `<div class="watchlist-section-title" style="color:#4cde8a;">🆕 ${sectionLabel} · ${newSeasonItems.length} title${newSeasonItems.length!==1?'s':''}</div>`;
     const grid = document.createElement('div');
     grid.className = 'watchlist-grid';
     newSeasonItems.forEach(item => grid.appendChild(buildWatchlistCard(item)));
@@ -3643,8 +3736,8 @@ function renderWatchlist() {
   if (wantToWatch.length) {
     // Exclude items already shown in New Seasons section
     const newSeasonIds = new Set(newSeasonItems.map(w => w.tmdbId));
-    const movies = wantToWatch.filter(w => w.mediaType === 'movie');
-    const shows  = wantToWatch.filter(w => w.mediaType === 'tv' && !newSeasonIds.has(w.tmdbId));
+    const movies = wantToWatch.filter(w => w.mediaType === 'movie' && !newSeasonIds.has(w.tmdbId));
+    const shows  = wantToWatch.filter(w => w.mediaType === 'tv'    && !newSeasonIds.has(w.tmdbId));
 
     function addWatchSection(items, label) {
       if (!items.length) return;
@@ -4829,71 +4922,91 @@ async function pruneDeletedFiles(silent = false) {
 // NEW SEASON DETECTION
 // ═══════════════════════════════════════════════════════
 
-async function checkWatchlistNewSeasons(showToast = false) {
+async function checkWatchlistNewSeasons(notify = false) {
   if (!state.settings.tmdbKey) return;
-  const tvShows = state.watchlist.filter(w => w.mediaType === 'tv');
-  if (!tvShows.length) return;
+  const items = state.watchlist.filter(w => w.mediaType === 'tv' || w.mediaType === 'movie');
+  if (!items.length) return;
 
-  const now     = new Date();
-  const past30  = new Date(now); past30.setDate(now.getDate() - 30);
+  const now      = new Date();
+  const past30   = new Date(now); past30.setDate(now.getDate() - 30);
   const future90 = new Date(now); future90.setDate(now.getDate() + 90);
 
   let newCount = 0;
   let changed  = false;
 
-  for (const item of tvShows) {
+  for (const item of items) {
     try {
-      const resp = await fetch(
-        `https://api.themoviedb.org/3/tv/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
-      );
-      if (!resp.ok) continue;
-      const data = await resp.json();
+      let airDate = null;
+      let label   = '';
+      let isNew   = false;
+      let isUpcoming = false;
+      let seasonNum  = null;
 
-      // Find the latest season (ignore specials — season 0)
-      const seasons = (data.seasons || []).filter(s => s.season_number > 0);
-      if (!seasons.length) continue;
-      const latest = seasons[seasons.length - 1];
-      const airDate = latest.air_date ? new Date(latest.air_date) : null;
-
-      if (!airDate) continue;
-
-      // Check if this is a new or upcoming season relative to our last check
-      const isNew      = airDate >= past30   && airDate <= now;
-      const isUpcoming = airDate > now       && airDate <= future90;
+      if (item.mediaType === 'tv') {
+        // ── TV: check for new/upcoming season ──────────────
+        const resp = await fetch(
+          `https://api.themoviedb.org/3/tv/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+        );
+        if (!resp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
+        const data = await resp.json();
+        const seasons = (data.seasons || []).filter(s => s.season_number > 0);
+        if (!seasons.length) { await new Promise(r => setTimeout(r, 150)); continue; }
+        const latest = seasons[seasons.length - 1];
+        airDate   = latest.air_date ? new Date(latest.air_date) : null;
+        seasonNum = latest.season_number;
+        if (!airDate) { await new Promise(r => setTimeout(r, 150)); continue; }
+        isNew      = airDate >= past30 && airDate <= now;
+        isUpcoming = airDate > now     && airDate <= future90;
+        if (isNew || isUpcoming) {
+          const dateStr = airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
+          label = isNew
+            ? `🆕 S${seasonNum} — aired ${dateStr}`
+            : `📅 S${seasonNum} — ${dateStr}`;
+        }
+      } else {
+        // ── Movie: check release date ───────────────────────
+        const resp = await fetch(
+          `https://api.themoviedb.org/3/movie/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+        );
+        if (!resp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
+        const data = await resp.json();
+        const releaseStr = data.release_date;
+        if (!releaseStr) { await new Promise(r => setTimeout(r, 150)); continue; }
+        airDate    = new Date(releaseStr);
+        isNew      = airDate >= past30 && airDate <= now;
+        isUpcoming = airDate > now     && airDate <= future90;
+        if (isNew || isUpcoming) {
+          const dateStr = airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
+          label = isNew
+            ? `🆕 Released ${dateStr}`
+            : `📅 Premieres ${dateStr}`;
+        }
+      }
 
       if (isNew || isUpcoming) {
-        const dateStr = airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
-        const label   = isNew
-          ? `🆕 S${latest.season_number} — aired ${dateStr}`
-          : `📅 S${latest.season_number} — ${dateStr}`;
-
-        // Only flag if this is a different season from what we last recorded
         const prev = item.newSeasonInfo;
-        if (!prev || prev.season !== latest.season_number || prev.dismissed) {
+        const prevKey = item.mediaType === 'tv' ? prev?.season : prev?.airDate;
+        const curKey  = item.mediaType === 'tv' ? seasonNum    : airDate?.toISOString();
+        if (!prev || prevKey !== curKey || prev.dismissed) {
           item.newSeasonInfo = {
-            season:    latest.season_number,
-            airDate:   latest.air_date,
+            season:    seasonNum,
+            airDate:   airDate?.toISOString().split('T')[0],
             label,
             isNew,
             isUpcoming,
             dismissed: false,
           };
-          // If the item was in Watched, un-watch it so it bubbles up
-          if (item.watched) {
-            item.watched = false;
-          }
+          if (item.watched) item.watched = false;
           newCount++;
           changed = true;
         }
       } else {
-        // Season is older than 30 days and no upcoming — clear any stale flag
         if (item.newSeasonInfo && !item.newSeasonInfo.dismissed) {
           item.newSeasonInfo = null;
           changed = true;
         }
       }
 
-      // Rate limit — be gentle with TMDB
       await new Promise(r => setTimeout(r, 150));
     } catch {}
   }
@@ -4903,16 +5016,15 @@ async function checkWatchlistNewSeasons(showToast = false) {
     renderWatchlist();
   }
 
-  if (showToast && newCount > 0) {
-    const names = state.watchlist
-      .filter(w => w.newSeasonInfo && !w.newSeasonInfo.dismissed)
-      .map(w => w.title)
-      .slice(0, 3)
-      .join(', ');
-    showToast(
-      `${newCount} show${newCount!==1?'s have':' has'} new or upcoming seasons — ${names}`,
-      'success'
-    );
+  if (notify && newCount > 0) {
+    const flagged = state.watchlist.filter(w => w.newSeasonInfo && !w.newSeasonInfo.dismissed);
+    const names   = flagged.map(w => w.title).slice(0, 3).join(', ');
+    const tvCount    = flagged.filter(w => w.mediaType === 'tv').length;
+    const movieCount = flagged.filter(w => w.mediaType === 'movie').length;
+    const parts = [];
+    if (tvCount)    parts.push(`${tvCount} show${tvCount!==1?'s':''}`);
+    if (movieCount) parts.push(`${movieCount} movie${movieCount!==1?'s':''}`);
+    showToast(`New & upcoming: ${parts.join(' and ')} — ${names}`, 'success');
   }
 }
 
@@ -4978,4 +5090,291 @@ function cleanDisplayTitle(raw) {
   if (!raw) return 'Unknown';
   // Strip extension and clean up filename into a readable title
   return (raw.replace(/\.[^/.]+$/, '').replace(/[._\-]+/g, ' ').trim()) || 'Unknown';
+}
+
+// ═══════════════════════════════════════════════════════
+// TV GUIDE — episode & movie release tracker
+// ═══════════════════════════════════════════════════════
+
+function updateTVGuideBadge() {
+  const badge = document.getElementById('tvguide-badge');
+  if (!badge) return;
+  const unread = (state.tvGuideNotifications || []).filter(n => !n.read).length;
+  if (unread > 0) {
+    badge.textContent = unread > 9 ? '9+' : String(unread);
+    badge.style.display = 'flex';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function renderTVGuide() {
+  const feed    = document.getElementById('tvguide-feed');
+  const empty   = document.getElementById('tvguide-empty');
+  const count   = document.getElementById('tvguide-count');
+  if (!feed) return;
+
+  // Mark all as read
+  (state.tvGuideNotifications || []).forEach(n => { n.read = true; });
+  updateTVGuideBadge();
+  saveLibrary();
+
+  const items = (state.tvGuideNotifications || [])
+    .slice()
+    .sort((a, b) => new Date(a.airDate) - new Date(b.airDate));
+
+  if (!items.length) {
+    feed.innerHTML = '';
+    empty.style.display = 'flex';
+    if (count) count.textContent = '';
+    return;
+  }
+  empty.style.display = 'none';
+  if (count) count.textContent = `${items.length} item${items.length !== 1 ? 's' : ''}`;
+
+  const now    = new Date();
+  const today  = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const groups = {};
+
+  items.forEach(item => {
+    const d    = new Date(item.airDate);
+    const diff = Math.floor((d - today) / 86400000);
+    let group;
+    if      (diff < 0)    group = 'RECENTLY AIRED';
+    else if (diff === 0)  group = 'TODAY';
+    else if (diff <= 7)   group = 'THIS WEEK';
+    else if (diff <= 30)  group = 'THIS MONTH';
+    else                  group = 'COMING SOON';
+    if (!groups[group]) groups[group] = [];
+    groups[group].push(item);
+  });
+
+  const ORDER = ['RECENTLY AIRED', 'TODAY', 'THIS WEEK', 'THIS MONTH', 'COMING SOON'];
+  feed.innerHTML = '';
+
+  ORDER.forEach(grp => {
+    if (!groups[grp]) return;
+    const hdr = document.createElement('div');
+    hdr.className = 'tvguide-section-title';
+    hdr.textContent = grp;
+    feed.appendChild(hdr);
+
+    groups[grp].forEach(item => {
+      const d       = new Date(item.airDate);
+      const diff    = Math.floor((d - today) / 86400000);
+      const isPast  = diff < 0;
+      const isToday = diff === 0;
+
+      const entry = document.createElement('div');
+      entry.className = `tvguide-entry ${isPast ? 'aired' : isToday ? 'unread' : 'upcoming'}`;
+
+      const icon = item.type === 'movie' ? '🎬' : '📺';
+      const dateStr = d.toLocaleDateString('en-GB', { day:'numeric', month:'short', year: diff > 60 ? 'numeric' : undefined });
+      const relStr  = isPast
+        ? (diff === -1 ? 'Yesterday' : `${Math.abs(diff)}d ago`)
+        : isToday ? 'Today'
+        : diff === 1 ? 'Tomorrow'
+        : dateStr;
+
+      entry.innerHTML = `
+        <div class="tvguide-entry-icon">${icon}</div>
+        <div class="tvguide-entry-body">
+          <div class="tvguide-entry-show">${esc(item.showTitle)}</div>
+          <div class="tvguide-entry-detail">${esc(item.detail)}</div>
+        </div>
+        <div class="tvguide-entry-date">${esc(relStr)}</div>
+        <div class="tvguide-entry-actions">
+          <button class="tvguide-view-btn">View</button>
+          <button class="tvguide-dismiss-btn" title="Dismiss">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>`;
+
+      // View button — open the title directly
+      entry.querySelector('.tvguide-view-btn').addEventListener('click', () => {
+        // Try My List first
+        const wlItem = state.watchlist.find(w => String(w.tmdbId) === String(item.tmdbId));
+        if (wlItem) {
+          if (item.type === 'tv') {
+            switchView('watchlist');
+            renderWatchlist();
+            // Open the TV overlay after a short delay so the view is ready
+            setTimeout(() => openWatchlistTVOverlay(wlItem), 150);
+          } else {
+            // Movie — open title detail page
+            openTitleDetailPage(item.tmdbId, 'movie', item.showTitle, null);
+          }
+          return;
+        }
+        // Try local library
+        const localMovie = state.library.find(f => String(f.metadata?.tmdbId) === String(item.tmdbId));
+        if (localMovie) { openDetail(localMovie); return; }
+        const localShow  = state.tvShows.find(s => String(s.metadata?.tmdbId) === String(item.tmdbId));
+        if (localShow)  { openDetail(localShow);  return; }
+        // Fallback — open TMDB search page
+        openTitleDetailPage(item.tmdbId, item.type, item.showTitle, null);
+      });
+
+      // Dismiss button
+      entry.querySelector('.tvguide-dismiss-btn').addEventListener('click', () => {
+        state.tvGuideNotifications = state.tvGuideNotifications.filter(n => n.id !== item.id);
+        saveLibrary();
+        renderTVGuide();
+      });
+
+      feed.appendChild(entry);
+    });
+  });
+}
+
+async function refreshTVGuide(notify = false) {
+  if (!state.settings.tmdbKey) return;
+
+  const now      = new Date();
+  const past30   = new Date(now); past30.setDate(now.getDate() - 30);
+  const future90 = new Date(now); future90.setDate(now.getDate() + 90);
+  const today    = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  const existingIds = new Set((state.tvGuideNotifications || []).map(n => n.id));
+  let added = 0;
+
+  // ── 1. My List TV shows — check current/next season episodes ──
+  const tvWatchlist = state.watchlist.filter(w => w.mediaType === 'tv' && w.tmdbId);
+  for (const item of tvWatchlist) {
+    try {
+      const resp = await fetch(
+        `https://api.themoviedb.org/3/tv/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+      );
+      if (!resp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
+      const data = await resp.json();
+      const seasons = (data.seasons || []).filter(s => s.season_number > 0);
+
+      for (const season of seasons.slice(-2)) { // check last 2 seasons
+        const key = `${item.tmdbId}_${season.season_number}`;
+        let episodes = tvEpisodeCache[key];
+        if (!episodes) {
+          const sr = await fetch(
+            `https://api.themoviedb.org/3/tv/${item.tmdbId}/season/${season.season_number}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+          );
+          if (sr.ok) {
+            const sd = await sr.json();
+            episodes = sd.episodes || [];
+            if (episodes.length) tvEpisodeCache[key] = episodes;
+          }
+          await new Promise(r => setTimeout(r, 120));
+        }
+        for (const ep of (episodes || [])) {
+          if (!ep.air_date) continue;
+          const airDate = new Date(ep.air_date);
+          if (airDate < past30 || airDate > future90) continue;
+          const id = `tv_${item.tmdbId}_s${season.season_number}e${ep.episode_number}`;
+          if (existingIds.has(id)) continue;
+          const detail = `S${String(season.season_number).padStart(2,'0')}E${String(ep.episode_number).padStart(2,'0')} — ${ep.name || 'Episode '+ep.episode_number}`;
+          state.tvGuideNotifications.push({
+            id, tmdbId: item.tmdbId, type: 'tv',
+            showTitle: item.title,
+            detail,
+            airDate: ep.air_date,
+            read: false,
+          });
+          existingIds.add(id);
+          added++;
+        }
+      }
+    } catch {}
+  }
+
+  // ── 2. Local TV shows with watched episodes — same logic ──
+  const activeLocal = state.tvShows.filter(show => {
+    if (!show.metadata?.tmdbId) return false;
+    return (show.episodes || []).some(e => e.watched);
+  });
+  for (const show of activeLocal) {
+    if (tvWatchlist.find(w => String(w.tmdbId) === String(show.metadata.tmdbId))) continue; // already handled
+    try {
+      const resp = await fetch(
+        `https://api.themoviedb.org/3/tv/${show.metadata.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+      );
+      if (!resp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
+      const data = await resp.json();
+      const seasons = (data.seasons || []).filter(s => s.season_number > 0);
+      const latestSeason = seasons[seasons.length - 1];
+      if (!latestSeason) continue;
+
+      const key = `${show.metadata.tmdbId}_${latestSeason.season_number}`;
+      let episodes = tvEpisodeCache[key];
+      if (!episodes) {
+        const sr = await fetch(
+          `https://api.themoviedb.org/3/tv/${show.metadata.tmdbId}/season/${latestSeason.season_number}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+        );
+        if (sr.ok) {
+          const sd = await sr.json();
+          episodes = sd.episodes || [];
+          if (episodes.length) tvEpisodeCache[key] = episodes;
+        }
+        await new Promise(r => setTimeout(r, 120));
+      }
+      for (const ep of (episodes || [])) {
+        if (!ep.air_date) continue;
+        const airDate = new Date(ep.air_date);
+        if (airDate < past30 || airDate > future90) continue;
+        const id = `tv_${show.metadata.tmdbId}_s${latestSeason.season_number}e${ep.episode_number}`;
+        if (existingIds.has(id)) continue;
+        const detail = `S${String(latestSeason.season_number).padStart(2,'0')}E${String(ep.episode_number).padStart(2,'0')} — ${ep.name || 'Episode '+ep.episode_number}`;
+        state.tvGuideNotifications.push({
+          id, tmdbId: show.metadata.tmdbId, type: 'tv',
+          showTitle: show.displayTitle || show.title,
+          detail,
+          airDate: ep.air_date,
+          read: false,
+        });
+        existingIds.add(id);
+        added++;
+      }
+    } catch {}
+  }
+
+  // ── 3. My List movies — check release dates ──
+  const movieWatchlist = state.watchlist.filter(w => w.mediaType === 'movie' && w.tmdbId);
+  for (const item of movieWatchlist) {
+    try {
+      const resp = await fetch(
+        `https://api.themoviedb.org/3/movie/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+      );
+      if (!resp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
+      const data = await resp.json();
+      if (!data.release_date) continue;
+      const airDate = new Date(data.release_date);
+      if (airDate < past30 || airDate > future90) continue;
+      const id = `movie_${item.tmdbId}`;
+      if (existingIds.has(id)) continue;
+      const diff = Math.floor((airDate - today) / 86400000);
+      const detail = diff > 0
+        ? `Premieres ${airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}`
+        : `Released ${airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}`;
+      state.tvGuideNotifications.push({
+        id, tmdbId: item.tmdbId, type: 'movie',
+        showTitle: item.title,
+        detail,
+        airDate: data.release_date,
+        read: false,
+      });
+      existingIds.add(id);
+      added++;
+    } catch {}
+  }
+
+  // Purge entries older than 30 days
+  state.tvGuideNotifications = state.tvGuideNotifications
+    .filter(n => new Date(n.airDate) >= past30);
+
+  saveLibrary();
+  updateTVGuideBadge();
+
+  // If TV Guide is currently open, re-render it
+  if (state.currentView === 'tvguide') renderTVGuide();
+
+  if (notify && added > 0) {
+    showToast(`TV Guide: ${added} new item${added !== 1 ? 's' : ''} added`, 'success');
+  }
 }

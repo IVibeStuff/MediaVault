@@ -52,6 +52,11 @@
           <span>My List</span>
           <span class="nav-badge" id="watchlist-badge" style="display:none"></span>
         </button>
+        <button class="nav-item" data-view="tvguide">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M6 8h4M14 8h4M6 12h12"/></svg>
+          <span>TV Guide</span>
+          <span class="nav-badge" id="tvguide-badge" style="display:none"></span>
+        </button>
         <button class="nav-item" data-view="settings">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.22 4.22l2.12 2.12M17.66 17.66l2.12 2.12M2 12h3M19 12h3M4.22 19.78l2.12-2.12M17.66 6.34l2.12-2.12"/></svg>
           <span>Settings</span>
@@ -130,6 +135,7 @@
         <div class="toolbar">
           <div class="toolbar-left">
             <h1 class="view-title">Settings</h1>
+            <span style="font-size:11px;color:var(--t2);font-family:'DM Mono',monospace;margin-left:8px;align-self:center;">v1.3.0</span>
           </div>
         </div>
 
@@ -629,6 +635,34 @@
         <div class="watchlist-content" id="watchlist-content"></div>
       </div>
 
+      <!-- TV Guide View -->
+      <div class="view" id="view-tvguide">
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <h1 class="view-title">TV Guide</h1>
+            <span class="view-count" id="tvguide-count"></span>
+          </div>
+          <div class="toolbar-right">
+            <button class="btn-secondary" id="tvguide-refresh-btn" style="font-size:11px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+              Refresh
+            </button>
+            <button class="btn-secondary" id="tvguide-clear-btn" style="font-size:11px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+              Clear all
+            </button>
+          </div>
+        </div>
+        <div class="tvguide-content" id="tvguide-content">
+          <div class="tvguide-empty" id="tvguide-empty" style="display:none">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            <p>No upcoming episodes or releases yet.</p>
+            <p style="font-size:12px;opacity:.6;">Add TV shows and movies to My List to track them here.</p>
+          </div>
+          <div id="tvguide-feed"></div>
+        </div>
+      </div>
+
     </main>
   </div><!-- #app -->
 
@@ -642,7 +676,7 @@
   <aside class="detail-panel" id="detail-panel">
     <div class="detail-scroll" id="detail-scroll">
 
-      <!-- Poster — full width, close button floats over it -->
+      <!-- Poster strip with gradient overlay and close button -->
       <div class="detail-poster-wrap">
         <button class="detail-close-btn" id="detail-close" title="Close panel">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
@@ -653,45 +687,86 @@
         <div class="detail-poster-placeholder" id="detail-poster-placeholder">
           <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 2v20M17 2v20M2 12h20"/></svg>
         </div>
+        <div class="detail-poster-gradient"></div>
       </div>
 
       <div class="detail-body">
+
+        <!-- Badges + title -->
         <div class="detail-badges" id="detail-badges"></div>
         <h2 class="detail-title" id="detail-title"></h2>
         <div class="detail-episode-label" id="detail-episode"></div>
+
+        <!-- Rating balloon -->
         <div class="detail-ratings" id="detail-ratings"></div>
-        <p class="detail-overview" id="detail-overview"></p>
+
+        <!-- Streaming banner — own line so it never wraps awkwardly -->
         <div id="detail-streaming-banner"></div>
 
-        <div class="detail-ep-box" id="detail-episode-info" style="display:none">
-          <h4 class="detail-ep-title" id="detail-ep-title"></h4>
-          <p class="detail-ep-body" id="detail-ep-overview"></p>
-        </div>
+        <!-- Overview -->
+        <p class="detail-overview" id="detail-overview"></p>
 
-        <div class="detail-actions">
-          <button class="btn-primary btn-play" id="detail-play">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M5 3l14 9-14 9V3z"/></svg>
+        <!-- Action buttons — clean minimal row -->
+        <div class="detail-actions" id="detail-actions-row">
+          <!-- Play: movies only, hidden for TV -->
+          <button class="detail-action-play" id="detail-play">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M5 3l14 9-14 9V3z"/></svg>
             Play
           </button>
-          <button class="btn-secondary" id="detail-reveal">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-            Show in Folder
+          <!-- Icon-only action buttons -->
+          <button class="detail-action-icon" id="detail-reveal" title="Show in Folder">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           </button>
-          <button class="btn-secondary" id="detail-hide-item" title="Hide this item from library">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-            Hide
+          <button class="detail-action-icon detail-action-hide" id="detail-hide-item" title="Hide from library">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
           </button>
-          <button class="btn-icon" id="detail-remap" title="Remap to correct title">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-          </button>
-          <button class="btn-icon" id="detail-fetch-meta" title="Refresh metadata">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-          </button>
+          <!-- Options dropdown -->
+          <div class="detail-options-wrap" style="position:relative;margin-left:auto;">
+            <button class="detail-action-icon" id="detail-options-btn" title="More options">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="5" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><circle cx="12" cy="19" r="1.2" fill="currentColor"/></svg>
+            </button>
+            <div class="detail-options-menu" id="detail-options-menu" style="display:none;">
+              <button class="detail-options-item" id="detail-remap">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                Remap title
+              </button>
+              <button class="detail-options-item" id="detail-fetch-meta">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                Refresh metadata
+              </button>
+              <button class="detail-options-item" id="detail-reset-item">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.5"/></svg>
+                Reset entry
+              </button>
+              <div class="detail-options-divider"></div>
+              <button class="detail-options-item detail-options-danger" id="detail-hide-option">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                Hide from library
+              </button>
+            </div>
+          </div>
         </div>
 
+        <div class="detail-divider"></div>
+
+        <!-- TV episode browser -->
+        <div id="detail-episode-info" style="display:none">
+          <div id="detail-ep-overview"></div>
+        </div>
+
+        <!-- File info collapsible -->
+        <div class="detail-fileinfo" id="detail-fileinfo" style="display:none">
+          <button class="detail-fileinfo-toggle" id="detail-fileinfo-toggle">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" id="detail-fileinfo-chevron"><polyline points="9 18 15 12 9 6"/></svg>
+            File info
+          </button>
+          <div class="detail-fileinfo-rows" id="detail-fileinfo-rows" style="display:none"></div>
+        </div>
+
+        <div class="detail-divider"></div>
         <div class="detail-info-grid" id="detail-info-grid"></div>
 
-        <!-- Remap panel — shown when user clicks the remap button -->
+        <!-- Remap panel -->
         <div class="remap-panel" id="remap-panel" style="display:none">
           <div class="remap-header">
             <span class="remap-title">
@@ -711,7 +786,6 @@
               Search
             </button>
           </div>
-          <!-- Search results appear here -->
           <div class="remap-results" id="remap-results"></div>
         </div>
 

@@ -299,18 +299,25 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
 
       if (epInfo) {
         // ── TV episode ────────────────────────────────────────
+        const dirBase = path.basename(dirPath);
+
+        // Detect if we're inside a season folder and extract its number
+        const seasonFolderMatch =
+          /^season[\s._-]?(\d+)/i.exec(dirBase) ||
+          /^s(\d{1,2})(?:\b|[\s._-]|$)/i.exec(dirBase) ||
+          /\bseason[\s._-]?(\d+)/i.exec(dirBase) ||
+          /\bs(\d{1,2})\b/i.exec(dirBase);
+        const isSeasonDir = !!seasonFolderMatch;
+        // If filename doesn't specify a season, inherit from the season folder
+        const effectiveSeason = (epInfo.season !== 1 || !isSeasonDir)
+          ? epInfo.season
+          : (seasonFolderMatch ? parseInt(seasonFolderMatch[1]) : epInfo.season);
+
         // Extract show title from filename first
         let showTitle = extractShowTitle(entry.name);
         if (!showTitle) {
-          const dirBase = path.basename(dirPath);
-          // If the parent folder looks like a season folder, go up one more level
-          const isSeasonDir =
-            /^season[\s._-]?\d+/i.test(dirBase) ||
-            /^s\d{1,2}(\b|[\s._-]|$)/i.test(dirBase) ||
-            /\bseason[\s._-]?\d+/i.test(dirBase) ||
-            /\bs\d{1,2}\b/i.test(dirBase);
           if (isSeasonDir) {
-            // Use the grandparent folder as the show name
+            // Use grandparent folder (the actual show folder)
             const grandparent = path.basename(path.dirname(dirPath));
             showTitle = extractShowTitle(grandparent) || cleanTitle(grandparent);
           } else {
@@ -332,7 +339,7 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
           sizeHuman: humanSize(stat.size),
           createdAt: stat.birthtime.toISOString(),
           modifiedAt: stat.mtime.toISOString(),
-          season: epInfo.season,
+          season: effectiveSeason,
           episode: epInfo.episode,
         });
       } else {
