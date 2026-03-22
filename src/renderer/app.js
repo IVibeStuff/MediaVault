@@ -2229,7 +2229,10 @@ function updateSelectionBar() {
   let bar = document.getElementById('selection-bar');
 
   if (state.selectedItems.size === 0) {
-    if (bar) bar.style.transform = 'translateY(100%)';
+    if (bar) {
+      bar.style.transform = 'translateX(-50%) translateY(200%)';
+      setTimeout(() => { if (bar && state.selectedItems.size === 0) bar.style.display = 'none'; }, 280);
+    }
     return;
   }
 
@@ -2295,6 +2298,7 @@ function updateSelectionBar() {
   document.getElementById('sel-count-label').textContent = `${n} item${n !== 1 ? 's' : ''} selected`;
 
   // Slide into view
+  bar.style.display = 'flex';
   requestAnimationFrame(() => {
     bar.style.transform = 'translateX(-50%) translateY(0)';
   });
