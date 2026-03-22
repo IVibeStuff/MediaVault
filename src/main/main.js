@@ -166,6 +166,8 @@ function extractShowTitle(name) {
     .replace(/[Ss]\d{1,2}[Ee]\d{1,3}.*/i, '')
     // Remove NxNN format
     .replace(/\d{1,2}x\d{2,3}.*/i, '')
+    // Remove Ep/Episode N and everything after
+    .replace(/[._\s\-][Ee]p(?:isode)?[\s._-]*\d{1,3}.*/i, '')
     // Remove Exx standalone
     .replace(/[._\s][Ee]\d{2,3}(?:[^0-9]|$).*/i, '')
     // Remove Season N and everything after

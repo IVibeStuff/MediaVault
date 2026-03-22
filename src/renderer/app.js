@@ -3662,10 +3662,26 @@ function addToWatchlist(tmdbId, mediaType, title, year, posterUrl, overview) {
   updateWatchlistBadge(true); // flash the badge briefly for new item
   renderWatchlist();           // refresh the list immediately wherever it is
   showToast(`"${title}" added to My List`, 'success');
+  // Check TV Guide for this new item immediately
+  if (state.settings.tmdbKey) {
+    refreshTVGuideForItem(String(tmdbId), mediaType);
+  }
 }
 
 function removeFromWatchlist(tmdbId) {
   state.watchlist = state.watchlist.filter(w => String(w.tmdbId) !== String(tmdbId));
+  // Remove any TV Guide entries for this item, unless they're from a local show
+  // (local shows with watched episodes also populate TV Guide)
+  const isLocalShow = state.tvShows.some(s => String(s.metadata?.tmdbId) === String(tmdbId));
+  if (!isLocalShow) {
+    const before = state.tvGuideNotifications.length;
+    state.tvGuideNotifications = state.tvGuideNotifications
+      .filter(n => String(n.tmdbId) !== String(tmdbId));
+    if (state.tvGuideNotifications.length < before) {
+      updateTVGuideBadge();
+      if (state.currentView === 'tvguide') renderTVGuide();
+    }
+  }
   saveLibrary();
   updateWatchlistBadge();
   renderWatchlist();
@@ -5380,5 +5396,90 @@ async function refreshTVGuide(notify = false) {
 
   if (notify && added > 0) {
     showToast(`TV Guide: ${added} new item${added !== 1 ? 's' : ''} added`, 'success');
+  }
+}
+
+// ── Targeted TV Guide refresh for a single newly-added item ──
+async function refreshTVGuideForItem(tmdbId, mediaType) {
+  if (!state.settings.tmdbKey) return;
+
+  const now      = new Date();
+  const past30   = new Date(now); past30.setDate(now.getDate() - 30);
+  const future90 = new Date(now); future90.setDate(now.getDate() + 90);
+  const today    = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  const existingIds = new Set((state.tvGuideNotifications || []).map(n => n.id));
+  const item = state.watchlist.find(w => String(w.tmdbId) === String(tmdbId));
+  if (!item) return;
+
+  let added = 0;
+
+  try {
+    if (mediaType === 'tv') {
+      const resp = await fetch(
+        `https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+      );
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const seasons = (data.seasons || []).filter(s => s.season_number > 0);
+
+      for (const season of seasons.slice(-2)) {
+        const key = `${tmdbId}_${season.season_number}`;
+        let episodes = tvEpisodeCache[key];
+        if (!episodes) {
+          const sr = await fetch(
+            `https://api.themoviedb.org/3/tv/${tmdbId}/season/${season.season_number}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+          );
+          if (sr.ok) {
+            const sd = await sr.json();
+            episodes = sd.episodes || [];
+            if (episodes.length) tvEpisodeCache[key] = episodes;
+          }
+        }
+        for (const ep of (episodes || [])) {
+          if (!ep.air_date) continue;
+          const airDate = new Date(ep.air_date);
+          if (airDate < past30 || airDate > future90) continue;
+          const id = `tv_${tmdbId}_s${season.season_number}e${ep.episode_number}`;
+          if (existingIds.has(id)) continue;
+          const detail = `S${String(season.season_number).padStart(2,'0')}E${String(ep.episode_number).padStart(2,'0')} — ${ep.name || 'Episode '+ep.episode_number}`;
+          state.tvGuideNotifications.push({
+            id, tmdbId: String(tmdbId), type: 'tv',
+            showTitle: item.title, detail,
+            airDate: ep.air_date, read: false,
+          });
+          existingIds.add(id);
+          added++;
+        }
+      }
+    } else {
+      const resp = await fetch(
+        `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+      );
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (!data.release_date) return;
+      const airDate = new Date(data.release_date);
+      if (airDate < past30 || airDate > future90) return;
+      const id = `movie_${tmdbId}`;
+      if (existingIds.has(id)) return;
+      const diff = Math.floor((airDate - today) / 86400000);
+      const detail = diff > 0
+        ? `Premieres ${airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}`
+        : `Released ${airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}`;
+      state.tvGuideNotifications.push({
+        id, tmdbId: String(tmdbId), type: 'movie',
+        showTitle: item.title, detail,
+        airDate: data.release_date, read: false,
+      });
+      added++;
+    }
+  } catch {}
+
+  if (added > 0) {
+    saveLibrary();
+    updateTVGuideBadge();
+    if (state.currentView === 'tvguide') renderTVGuide();
+    showToast(`TV Guide: ${added} new item${added !== 1 ? 's' : ''} added for "${item.title}"`, 'info');
   }
 }
