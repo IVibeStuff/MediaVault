@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFile:         (p)                                 => ipcRenderer.invoke('open-file', p),
   clearItemCache:   (ids)                                => ipcRenderer.invoke('clear-item-cache', ids),
   openExternal:     (url)                                => ipcRenderer.invoke('open-external', url),
+  getAppVersion:    ()                                   => ipcRenderer.invoke('get-app-version'),
   checkFilesExist:  (data)                               => ipcRenderer.invoke('check-files-exist', data),
   saveFile:         (opts)                               => ipcRenderer.invoke('save-file', opts),
   readFile:         (opts)                               => ipcRenderer.invoke('read-file', opts),

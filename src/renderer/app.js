@@ -5028,22 +5028,47 @@ async function checkWatchlistNewSeasons(notify = false) {
             : `📅 S${seasonNum} — ${dateStr}`;
         }
       } else {
-        // ── Movie: check release date ───────────────────────
-        const resp = await fetch(
-          `https://api.themoviedb.org/3/movie/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+    } else {
+        // ── Movie: check theatrical + streaming/digital release dates ──
+        const country = (state.settings.countryCode || 'US').toUpperCase();
+        const [baseResp, datesResp] = await Promise.all([
+          fetch(`https://api.themoviedb.org/3/movie/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`),
+          fetch(`https://api.themoviedb.org/3/movie/${item.tmdbId}/release_dates?api_key=${encodeURIComponent(state.settings.tmdbKey)}`),
+        ]);
+        if (!baseResp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
+        const baseData  = await baseResp.json();
+        const datesData = datesResp.ok ? await datesResp.json() : null;
+
+        // Collect theatrical + digital (4) + streaming/TV (6) dates
+        const candidates = [];
+        if (baseData.release_date) candidates.push(new Date(baseData.release_date));
+        if (datesData?.results) {
+          const regions = [country, 'US'];
+          for (const region of regions) {
+            const entry = datesData.results.find(r => r.iso_3166_1 === region);
+            if (!entry) continue;
+            for (const rel of (entry.release_dates || [])) {
+              if ([3, 4, 6].includes(rel.type) && rel.release_date) {
+                candidates.push(new Date(rel.release_date));
+              }
+            }
+          }
+        }
+
+        // Use the most recent in-window date
+        const inWindow = candidates.filter(d =>
+          (d >= past90 && d <= now) || (d > now && d <= future90)
         );
-        if (!resp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
-        const data = await resp.json();
-        const releaseStr = data.release_date;
-        if (!releaseStr) { await new Promise(r => setTimeout(r, 150)); continue; }
-        airDate    = new Date(releaseStr);
-        isNew      = airDate >= past30 && airDate <= now;
-        isUpcoming = airDate > now     && airDate <= future90;
+        if (!inWindow.length) { await new Promise(r => setTimeout(r, 150)); continue; }
+
+        const pastDates   = inWindow.filter(d => d <= now).sort((a,b) => b - a);
+        const futureDates = inWindow.filter(d => d > now).sort((a,b) => a - b);
+        airDate    = pastDates[0] || futureDates[0];
+        isNew      = airDate >= past90 && airDate <= now;
+        isUpcoming = airDate > now && airDate <= future90;
         if (isNew || isUpcoming) {
           const dateStr = airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
-          label = isNew
-            ? `🆕 Released ${dateStr}`
-            : `📅 Premieres ${dateStr}`;
+          label = isNew ? `🆕 Available ${dateStr}` : `📅 Available ${dateStr}`;
         }
       }
 
@@ -5498,24 +5523,45 @@ async function refreshTVGuideForItem(tmdbId, mediaType) {
         }
       }
     } else {
-      const resp = await fetch(
-        `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
-      );
-      if (!resp.ok) return;
-      const data = await resp.json();
-      if (!data.release_date) return;
-      const airDate = new Date(data.release_date);
-      if (airDate < past90 || airDate > future90) return;
+      const country = (state.settings.countryCode || 'US').toUpperCase();
+      const [baseResp, datesResp] = await Promise.all([
+        fetch(`https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`),
+        fetch(`https://api.themoviedb.org/3/movie/${tmdbId}/release_dates?api_key=${encodeURIComponent(state.settings.tmdbKey)}`),
+      ]);
+      if (!baseResp.ok) return;
+      const baseData  = await baseResp.json();
+      const datesData = datesResp.ok ? await datesResp.json() : null;
+
+      const candidates = [];
+      if (baseData.release_date) candidates.push(new Date(baseData.release_date));
+      if (datesData?.results) {
+        for (const region of [country, 'US']) {
+          const entry = datesData.results.find(r => r.iso_3166_1 === region);
+          if (!entry) continue;
+          for (const rel of (entry.release_dates || [])) {
+            if ([3, 4, 6].includes(rel.type) && rel.release_date) {
+              candidates.push(new Date(rel.release_date));
+            }
+          }
+        }
+      }
+
+      const inWindow = candidates.filter(d => d >= past90 && d <= future90);
+      if (!inWindow.length) return;
+      const pastDates   = inWindow.filter(d => d <= today).sort((a,b) => b - a);
+      const futureDates = inWindow.filter(d => d > today).sort((a,b) => a - b);
+      const airDate = pastDates[0] || futureDates[0];
+
       const id = `movie_${tmdbId}`;
       if (existingIds.has(id)) return;
       const diff = Math.floor((airDate - today) / 86400000);
       const detail = diff > 0
-        ? `Premieres ${airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}`
-        : `Released ${airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}`;
+        ? `Available ${airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}`
+        : `Available ${airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}`;
       state.tvGuideNotifications.push({
         id, tmdbId: String(tmdbId), type: 'movie',
         showTitle: item.title, detail,
-        airDate: data.release_date, read: false,
+        airDate: airDate.toISOString().split('T')[0], read: false,
       });
       added++;
     }

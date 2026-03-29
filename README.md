@@ -1,4 +1,4 @@
-# MediaVault v1.6.2
+# MediaVault v1.6.3
 
 A sleek desktop media manager for Windows with TMDB/OMDB metadata, poster art, episode tracking, watchlist, and streaming availability.
 
@@ -43,12 +43,12 @@ npm run build
 Output:
 ```
 dist/
-  MediaVault-Setup-1.6.2.exe
+  MediaVault-Setup-1.6.3.exe
 ```
 
 ### Step 4 — Install
 
-Run `MediaVault-Setup-1.6.2.exe`. The installer lets you choose the install
+Run `MediaVault-Setup-1.6.3.exe`. The installer lets you choose the install
 directory, creates a Desktop shortcut and a Start Menu entry under MediaVault.
 
 ---
