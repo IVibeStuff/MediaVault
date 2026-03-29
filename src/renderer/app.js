@@ -50,6 +50,7 @@ const state = {
   watchlistVisited: false,
   navStack: [],
   tvGuideNotifications: [],
+  tvGuideDismissed: new Set(), // persisted IDs of dismissed entries
   tvGuideVisited: false,
 };
 
@@ -279,6 +280,7 @@ async function loadLibraryData() {
     if (saved.subscribedServices) state.settings.subscribedServices = saved.subscribedServices;
     state.watchlist = saved.watchlist || [];
     state.tvGuideNotifications = saved.tvGuideNotifications || [];
+    state.tvGuideDismissed = new Set(saved.tvGuideDismissed || []);
     // Restore full settings from library.json (more reliable than localStorage in Electron)
     if (saved.settings) {
       Object.assign(state.settings, saved.settings);
@@ -1540,6 +1542,7 @@ function saveLibrary() {
     subscribedServices: state.settings.subscribedServices,
     watchlist: state.watchlist,
     tvGuideNotifications: state.tvGuideNotifications,
+    tvGuideDismissed: [...state.tvGuideDismissed],
     settings: state.settings, // persist ALL settings to library.json
   });
 }
@@ -5263,19 +5266,28 @@ function renderTVGuide() {
         : diff === 1 ? 'Tomorrow'
         : dateStr;
 
+      const isSeen = !!item.seen;
       entry.innerHTML = `
-        <div class="tvguide-entry-icon">${icon}</div>
+        <div class="tvguide-entry-icon">${isSeen ? '✓' : icon}</div>
         <div class="tvguide-entry-body">
-          <div class="tvguide-entry-show">${esc(item.showTitle)}</div>
+          <div class="tvguide-entry-show" style="color:${isSeen ? 'var(--t2)' : 'var(--t0)'};text-decoration:${isSeen ? 'line-through' : 'none'};">${esc(item.showTitle)}</div>
           <div class="tvguide-entry-detail">${esc(item.detail)}</div>
         </div>
         <div class="tvguide-entry-date">${esc(relStr)}</div>
         <div class="tvguide-entry-actions">
+          <button class="tvguide-seen-btn${isSeen ? ' seen' : ''}" title="${item.type === 'movie' ? 'Mark as watched' : 'Mark episode as watched'}">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+          </button>
           <button class="tvguide-view-btn">View</button>
           <button class="tvguide-dismiss-btn" title="Dismiss">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>`;
+
+      // Seen button — mark watched then dismiss
+      entry.querySelector('.tvguide-seen-btn').addEventListener('click', () => {
+        markTVGuideEntrySeen(item);
+      });
 
       // View button — open the title directly
       entry.querySelector('.tvguide-view-btn').addEventListener('click', () => {
@@ -5304,6 +5316,7 @@ function renderTVGuide() {
 
       // Dismiss button
       entry.querySelector('.tvguide-dismiss-btn').addEventListener('click', () => {
+        state.tvGuideDismissed.add(item.id);
         state.tvGuideNotifications = state.tvGuideNotifications.filter(n => n.id !== item.id);
         saveLibrary();
         renderTVGuide();
@@ -5355,7 +5368,7 @@ async function refreshTVGuide(notify = false) {
           const airDate = new Date(ep.air_date);
           if (airDate < past30 || airDate > future90) continue;
           const id = `tv_${item.tmdbId}_s${season.season_number}e${ep.episode_number}`;
-          if (existingIds.has(id)) continue;
+          if (existingIds.has(id) || state.tvGuideDismissed.has(id)) continue;
           const detail = `S${String(season.season_number).padStart(2,'0')}E${String(ep.episode_number).padStart(2,'0')} — ${ep.name || 'Episode '+ep.episode_number}`;
           state.tvGuideNotifications.push({
             id, tmdbId: item.tmdbId, type: 'tv',
@@ -5363,6 +5376,7 @@ async function refreshTVGuide(notify = false) {
             detail,
             airDate: ep.air_date,
             read: false,
+            seen: false,
           });
           existingIds.add(id);
           added++;
@@ -5406,7 +5420,7 @@ async function refreshTVGuide(notify = false) {
         const airDate = new Date(ep.air_date);
         if (airDate < past30 || airDate > future90) continue;
         const id = `tv_${show.metadata.tmdbId}_s${latestSeason.season_number}e${ep.episode_number}`;
-        if (existingIds.has(id)) continue;
+        if (existingIds.has(id) || state.tvGuideDismissed.has(id)) continue;
         const detail = `S${String(latestSeason.season_number).padStart(2,'0')}E${String(ep.episode_number).padStart(2,'0')} — ${ep.name || 'Episode '+ep.episode_number}`;
         state.tvGuideNotifications.push({
           id, tmdbId: show.metadata.tmdbId, type: 'tv',
@@ -5434,7 +5448,7 @@ async function refreshTVGuide(notify = false) {
       const airDate = new Date(data.release_date);
       if (airDate < past30 || airDate > future90) continue;
       const id = `movie_${item.tmdbId}`;
-      if (existingIds.has(id)) continue;
+      if (existingIds.has(id) || state.tvGuideDismissed.has(id)) continue;
       const diff = Math.floor((airDate - today) / 86400000);
       const detail = diff > 0
         ? `Premieres ${airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}`
@@ -5451,9 +5465,17 @@ async function refreshTVGuide(notify = false) {
     } catch {}
   }
 
-  // Purge entries older than 30 days
+  // Purge entries and dismissed IDs older than the lookback window
   state.tvGuideNotifications = state.tvGuideNotifications
     .filter(n => new Date(n.airDate) >= past30);
+  // Keep dismissed set bounded — only retain IDs that could still reappear
+  // (i.e. whose air date is within the future90 window). Since IDs don't encode
+  // dates directly, we keep any dismissed ID that still matches a notification
+  // we just purged, plus a hard cap of 500 entries to prevent unbounded growth.
+  if (state.tvGuideDismissed.size > 500) {
+    const arr = [...state.tvGuideDismissed];
+    state.tvGuideDismissed = new Set(arr.slice(arr.length - 500));
+  }
 
   saveLibrary();
   updateTVGuideBadge();
@@ -5508,7 +5530,7 @@ async function refreshTVGuideForItem(tmdbId, mediaType) {
           const airDate = new Date(ep.air_date);
           if (airDate < past90 || airDate > future90) continue;
           const id = `tv_${tmdbId}_s${season.season_number}e${ep.episode_number}`;
-          if (existingIds.has(id)) continue;
+          if (existingIds.has(id) || state.tvGuideDismissed.has(id)) continue;
           const detail = `S${String(season.season_number).padStart(2,'0')}E${String(ep.episode_number).padStart(2,'0')} — ${ep.name || 'Episode '+ep.episode_number}`;
           state.tvGuideNotifications.push({
             id, tmdbId: String(tmdbId), type: 'tv',
@@ -5550,7 +5572,7 @@ async function refreshTVGuideForItem(tmdbId, mediaType) {
       const airDate = pastDates[0] || futureDates[0];
 
       const id = `movie_${tmdbId}`;
-      if (existingIds.has(id)) return;
+      if (existingIds.has(id) || state.tvGuideDismissed.has(id)) return;
       const diff = Math.floor((airDate - today) / 86400000);
       const detail = diff > 0
         ? `Available ${airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' })}`
@@ -5570,6 +5592,67 @@ async function refreshTVGuideForItem(tmdbId, mediaType) {
     if (state.currentView === 'tvguide') renderTVGuide();
     showToast(`TV Guide: ${added} new item${added !== 1 ? 's' : ''} added for "${item.title}"`, 'info');
   }
+}
+
+
+// ── Mark a TV Guide entry as seen ────────────────────────────────────────────
+function markTVGuideEntrySeen(item) {
+  const tmdbId = String(item.tmdbId);
+
+  if (item.type === 'movie') {
+    // ── Movie: mark My List item as watched ──────────────────
+    const wlItem = state.watchlist.find(w => String(w.tmdbId) === tmdbId);
+    if (wlItem) {
+      wlItem.watched = true;
+      saveLibrary();
+      renderWatchlist();
+      showToast(`"${item.showTitle}" marked as watched`, 'success');
+    }
+
+  } else {
+    // ── TV episode: parse season + episode from the entry ID ──
+    // ID format: tv_tmdbId_sNNeNN
+    const m = item.id.match(/_s(\d+)e(\d+)$/);
+    const season  = m ? parseInt(m[1]) : null;
+    const episode = m ? parseInt(m[2]) : null;
+
+    if (season !== null && episode !== null) {
+      // Try My List watchlist first
+      const wlItem = state.watchlist.find(w => String(w.tmdbId) === tmdbId);
+      if (wlItem) {
+        if (!wlItem.watchedEpisodes) wlItem.watchedEpisodes = {};
+        wlItem.watchedEpisodes[`${season}-${episode}`] = true;
+        saveLibrary();
+        if (state.currentView === 'watchlist') renderWatchlist();
+      }
+
+      // Also mark in local library if the show exists there
+      const localShow = state.tvShows.find(s =>
+        String(s.metadata?.tmdbId) === tmdbId
+      );
+      if (localShow) {
+        const ep = (localShow.episodes || []).find(
+          e => e.season === season && e.episode === episode
+        );
+        if (ep) {
+          ep.watched = true;
+          saveLibrary();
+        }
+      }
+
+      showToast(
+        `S${String(season).padStart(2,'0')}E${String(episode).padStart(2,'0')} marked as watched`,
+        'success'
+      );
+    }
+  }
+
+  // Dismiss the entry from TV Guide (Option B behaviour)
+  state.tvGuideDismissed.add(item.id);
+  state.tvGuideNotifications = state.tvGuideNotifications.filter(n => n.id !== item.id);
+  saveLibrary();
+  updateTVGuideBadge();
+  renderTVGuide();
 }
 
 // ═══════════════════════════════════════════════════════

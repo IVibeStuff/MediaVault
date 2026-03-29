@@ -1813,3 +1813,26 @@ body.platform-darwin .titlebar-left { padding-left: 60px; }
   from { opacity: 0; transform: translateX(20px); }
   to   { opacity: 1; transform: translateX(0); }
 }
+
+/* ── TV Guide Seen button ── */
+.tvguide-seen-btn {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: var(--bg-3);
+  border: 1.5px solid var(--border-mid);
+  color: var(--t2);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background var(--transition), border-color var(--transition), color var(--transition);
+  flex-shrink: 0;
+}
+.tvguide-seen-btn:hover {
+  background: rgba(76,222,138,.15);
+  border-color: #4cde8a;
+  color: #4cde8a;
+}
+.tvguide-seen-btn.seen {
+  background: rgba(76,222,138,.15);
+  border-color: #4cde8a;
+  color: #4cde8a;
+}

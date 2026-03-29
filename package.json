@@ -1,6 +1,6 @@
 {
   "name": "mediavault",
-  "version": "1.6.4",
+  "version": "1.6.6",
   "description": "A sleek media manager with metadata enrichment",
   "main": "src/main/main.js",
   "scripts": {
