@@ -182,7 +182,12 @@ async function init() {
     e.stopPropagation();
     optMenu.style.display = optMenu.style.display === 'none' ? 'block' : 'none';
   });
-  document.addEventListener('click', () => { optMenu.style.display = 'none'; });
+  document.addEventListener('click', e => {
+    // Don't close options menu if click is inside the detail panel itself
+    const panel = document.getElementById('detail-panel');
+    if (panel && panel.contains(e.target)) return;
+    optMenu.style.display = 'none';
+  });
 
   document.getElementById('detail-remap').addEventListener('click', () => {
     optMenu.style.display = 'none';
@@ -325,9 +330,12 @@ async function loadLibraryData() {
     }
   }
 
-  // Auto-rescan on startup — finds new files without touching existing metadata
+  // Prune deleted files immediately on startup — before first render
   if (state.folders.length > 0) {
-    setTimeout(() => handleRescan(true), 1500);
+    pruneDeletedFiles(true).then(() => {
+      // Then do the full rescan after a short delay
+      setTimeout(() => handleRescan(true), 1500);
+    });
   }
 
   // Check for new/upcoming seasons on watchlist TV shows
@@ -1986,14 +1994,17 @@ function toggleRemapPanel(visible) {
   if (!panel) return;
   panel.style.display = visible ? 'block' : 'none';
   if (visible) {
-    // Pre-fill with current title as a starting point
+    // Stop clicks inside remap panel from bubbling to document
+    // (prevents options menu handler from stealing focus)
+    panel.onclick = e => e.stopPropagation();
     const input = document.getElementById('remap-input');
     if (input && state.activeItem) {
       input.value = state.activeItem.displayTitle || state.activeItem.title || '';
-      input.focus();
-      input.select();
+      setTimeout(() => { input.focus(); input.select(); }, 50);
     }
     document.getElementById('remap-results').innerHTML = '';
+  } else {
+    panel.onclick = null;
   }
 }
 
@@ -3575,8 +3586,8 @@ async function handleRescan(silent = false) {
   if (!silent) showProgress(true, 'Rescanning…', 0);
 
   try {
-    // Prune deleted files first
-    const pruned = await pruneDeletedFiles(silent);
+    // Prune deleted files (also runs at startup, but run again here for manual rescans)
+    const pruned = silent ? { movies: 0, shows: 0, episodes: 0 } : await pruneDeletedFiles(false);
 
     const scanSettings = { junkKeywords: state.settings.junkKeywords, minFileSizeMb: state.settings.minFileSizeMb };
     const result = await api.scanFolders(state.folders, state.settings.excludedFolders, scanSettings);
@@ -4908,28 +4919,56 @@ function renderWLEpisodePanel(wlItem, container, totalSeasons, startSeason) {
 // ═══════════════════════════════════════════════════════
 
 async function pruneDeletedFiles(silent = false) {
-  const result = { movies: 0, shows: 0 };
+  const result = { movies: 0, shows: 0, episodes: 0 };
   try {
-    const { missingMovieIds, missingTVIds } = await api.checkFilesExist({
+    const { missingMovieIds, missingTVIds, missingEpisodes } = await api.checkFilesExist({
       movies: state.library,
       tvShows: state.tvShows,
     });
 
-    if (missingMovieIds.length || missingTVIds.length) {
-      state.library  = state.library.filter(f => !missingMovieIds.includes(f.id));
-      state.tvShows  = state.tvShows.filter(s => !missingTVIds.includes(s.id));
-      result.movies  = missingMovieIds.length;
-      result.shows   = missingTVIds.length;
+    // Remove entire missing movies
+    if (missingMovieIds.length) {
+      state.library = state.library.filter(f => !missingMovieIds.includes(f.id));
+      result.movies = missingMovieIds.length;
+    }
 
+    // Remove entire missing shows
+    if (missingTVIds.length) {
+      state.tvShows = state.tvShows.filter(s => !missingTVIds.includes(s.id));
+      result.shows  = missingTVIds.length;
+    }
+
+    // Prune individual missing episodes from partially-deleted shows
+    if (missingEpisodes && Object.keys(missingEpisodes).length) {
+      for (const [showId, missingPaths] of Object.entries(missingEpisodes)) {
+        const show = state.tvShows.find(s => s.id === showId);
+        if (!show) continue;
+        const missingSet = new Set(missingPaths);
+        const before = show.episodes.length;
+        show.episodes = show.episodes.filter(e => !missingSet.has(e.path));
+        const removed = before - show.episodes.length;
+        if (removed > 0) {
+          result.episodes += removed;
+          // Recalculate counts
+          show.episodeCount = show.episodes.length;
+          const seasons = new Set(show.episodes.map(e => e.season));
+          show.seasonCount = seasons.size;
+        }
+      }
+    }
+
+    const totalChanged = result.movies + result.shows + result.episodes;
+    if (totalChanged > 0) {
       applyFiltersAndSort();
       updateStats();
       saveLibrary();
 
-      if (!silent && (result.movies + result.shows) > 0) {
-        showToast(
-          `Removed ${result.movies + result.shows} deleted item${result.movies + result.shows !== 1 ? 's' : ''} from library`,
-          'info'
-        );
+      if (!silent) {
+        const parts = [];
+        if (result.movies)   parts.push(`${result.movies} movie${result.movies !== 1 ? 's' : ''}`);
+        if (result.shows)    parts.push(`${result.shows} show${result.shows !== 1 ? 's' : ''}`);
+        if (result.episodes) parts.push(`${result.episodes} episode${result.episodes !== 1 ? 's' : ''}`);
+        showToast(`Removed ${parts.join(', ')} from library`, 'info');
       }
     }
   } catch (e) {
@@ -5077,7 +5116,7 @@ async function resetItems(ids) {
       show.metadata    = null;
       show.posterPath  = null;
       show.status      = 'pending';
-      show.title       = show.displayTitle = cleanDisplayTitle(show.filename || show.title);
+      show.title       = show.displayTitle = show.title || cleanDisplayTitle(show.path);
       state.metadataFetched.delete(id);
     }
   });

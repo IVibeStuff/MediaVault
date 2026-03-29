@@ -1786,3 +1786,24 @@ body.platform-darwin .titlebar-left { padding-left: 60px; }
   transition: background var(--transition), color var(--transition);
 }
 .tvguide-dismiss-btn:hover { background: var(--bg-4); color: var(--t0); }
+
+/* ── Missing class rules (were relying on inline styles or absent) ── */
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 5px;
+}
+.folder-path {
+  flex: 1;
+  font-size: 12px;
+  color: var(--t1);
+  font-family: 'DM Mono', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -173,8 +173,13 @@ function extractShowTitle(name) {
     // Remove Season N and everything after
     .replace(/[._\s\-][Ss]eason[\s._-]?\d+.*/i, '')
     .replace(/[Ss]eason[\s._-]?\d+.*/i, '')
+    // Remove SNN-SNN range patterns (e.g. S01-S02) and everything after
+    .replace(/[._\s\-][Ss]\d{1,2}[-–][Ss]\d{1,2}.*/i, '')
+    .replace(/[Ss]\d{1,2}[-–][Ss]\d{1,2}.*/i, '')
     // Remove year and everything after (years in show names are rare)
-    .replace(/\b(19|20)\d{2}\b.*/i, '');
+    .replace(/\b(19|20)\d{2}\b.*/i, '')
+    // Strip any trailing unclosed bracket or punctuation
+    .replace(/[\s([{.,_-]+$/, '');
   const cleaned = cleanTitle(t);
   // If cleaning wiped everything, fall back to the original cleaned name
   return cleaned || cleanTitle(name.replace(/[._\-]+/g,' ').trim());
@@ -229,20 +234,34 @@ function parseMovieName(filename, filePath) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// SCANNER — completely rewritten with a simple, reliable model
+// SCANNER — hybrid approach
 //
-// Core philosophy:
-//   scanDirectory(rootPath) is called once per user-added folder.
-//   It does NOT try to auto-detect whether the folder is "TV" or "Movies".
-//   Instead it recursively walks EVERYTHING and classifies each video file
-//   individually based on whether its name/path contains episode patterns.
+// Philosophy:
+//   Walk everything recursively. For each video file:
+//   1. If inside a named Season folder → use grandparent as show name,
+//      season number from folder name
+//   2. If filename has SxxExx pattern → TV show, title from filename
+//   3. Otherwise → Movie
 //
-//   TV episode   → SxxExx, NxNN, Exx patterns in filename
-//   Movie        → everything else that passes junk filter
-//
-//   Shows are grouped by extracting the show title from the episode filename.
-//   This means pack folders, season folders, flat folders all just work.
+//   This handles all real-world structures without trying to classify
+//   folders as "show roots" which is unreliable for mixed containers.
 // ═══════════════════════════════════════════════════════════
+
+function isSeasonFolder(name) {
+  // Exclude range patterns — show pack folders
+  if (/season[\s._-]?\d+[\s._-]*[-–][\s._-]*\d+/i.test(name)) return false;
+  if (/\bS\d{1,2}[-–]S\d{1,2}\b/i.test(name)) return false;
+  // Must START with Season/S — 'Flashpoint Season 2' is a show folder, not a season folder
+  return /^season[\s._-]?\d+/i.test(name) ||
+         /^s\d{1,2}([\s._-]|$)/i.test(name);
+}
+
+function seasonFolderNumber(name) {
+  const m = /^season[\s._-]?(\d+)/i.exec(name) ||
+            /^s(\d{1,2})(?:[\s._-]|$)/i.exec(name) ||
+            /\bseason[\s._-]?(\d+)/i.exec(name);
+  return m ? parseInt(m[1]) : 1;
+}
 
 function scanDirectory(rootPath, excludedPaths, userSettings) {
   const excluded = new Set((excludedPaths || []).map(p => p.toLowerCase()));
@@ -254,27 +273,59 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
     return false;
   }
 
-  // Accumulators
-  const movieMap  = new Map();  // filePath → movie object
-  const showMap   = new Map();  // normalisedShowTitle → { title, episodes[] }
+  const movieMap = new Map();
+  const showMap  = new Map();
 
-  // Walk every file recursively — no folder-type analysis
+  function addEpisode(fullPath, entry, stat, ext, showTitle, seasonNum, episodeNum) {
+    const norm = showTitle.toLowerCase().replace(/\s+/g, ' ').trim();
+    if (!showMap.has(norm)) showMap.set(norm, { title: showTitle, episodes: [] });
+    showMap.get(norm).episodes.push({
+      id: Buffer.from(fullPath).toString('base64')
+            .replace(/[^a-zA-Z0-9]/g, '').substring(0, 20) + '_' + stat.mtimeMs,
+      path: fullPath, filename: entry.name, extension: ext,
+      size: stat.size, sizeHuman: humanSize(stat.size),
+      createdAt: stat.birthtime.toISOString(),
+      modifiedAt: stat.mtime.toISOString(),
+      season: seasonNum, episode: episodeNum,
+    });
+  }
+
+  function addMovie(fullPath, entry, stat, ext) {
+    if (movieMap.has(fullPath)) return;
+    const parsed = parseMovieName(entry.name, fullPath);
+    movieMap.set(fullPath, {
+      id: Buffer.from(fullPath).toString('base64')
+            .replace(/[^a-zA-Z0-9]/g, '').substring(0, 20) + '_' + stat.mtimeMs,
+      type: 'movie', path: fullPath, filename: entry.name, extension: ext,
+      size: stat.size, sizeHuman: humanSize(stat.size),
+      createdAt: stat.birthtime.toISOString(),
+      modifiedAt: stat.mtime.toISOString(),
+      title: parsed.title, displayTitle: parsed.title, year: parsed.year,
+      metadata: null, posterPath: null, status: 'pending',
+    });
+  }
+
   function walk(dirPath) {
     if (isExcluded(dirPath)) return;
     let entries;
     try { entries = fs.readdirSync(dirPath, { withFileTypes: true }); }
     catch { return; }
 
-    // Collect video files at this level for folder-junk detection
+    const dirBase = path.basename(dirPath);
+    const parentBase = path.basename(path.dirname(dirPath));
+
+    // Determine if this directory is a season folder
+    const thisIsSeasonDir = isSeasonFolder(dirBase);
+    const seasonNum = thisIsSeasonDir ? seasonFolderNumber(dirBase) : null;
+
+    // Collect video files for junk detection
     const dirVideos = [];
     for (const e of entries) {
       if (!e.isFile()) continue;
       const ext = path.extname(e.name).toLowerCase();
       if (!VIDEO_EXT.has(ext)) continue;
-      try {
-        const s = fs.statSync(path.join(dirPath, e.name));
-        dirVideos.push({ name: e.name, size: s.size });
-      } catch {}
+      try { dirVideos.push({ name: e.name, size: fs.statSync(path.join(dirPath, e.name)).size }); }
+      catch {}
     }
     const folderJunk = getFolderJunkFiles(dirVideos, userSettings);
 
@@ -293,80 +344,27 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
 
       let stat;
       try { stat = fs.statSync(fullPath); } catch { continue; }
-
       if (isJunkFile(entry.name, stat.size, userSettings, fullPath)) continue;
       if (folderJunk.has(entry.name)) continue;
 
       const epInfo = extractEpisodeInfo(entry.name);
 
-      if (epInfo) {
-        // ── TV episode ────────────────────────────────────────
-        const dirBase = path.basename(dirPath);
-
-        // Detect if we're inside a season folder and extract its number
-        const seasonFolderMatch =
-          /^season[\s._-]?(\d+)/i.exec(dirBase) ||
-          /^s(\d{1,2})(?:\b|[\s._-]|$)/i.exec(dirBase) ||
-          /\bseason[\s._-]?(\d+)/i.exec(dirBase) ||
-          /\bs(\d{1,2})\b/i.exec(dirBase);
-        const isSeasonDir = !!seasonFolderMatch;
-        // If filename doesn't specify a season, inherit from the season folder
-        const effectiveSeason = (epInfo.season !== 1 || !isSeasonDir)
-          ? epInfo.season
-          : (seasonFolderMatch ? parseInt(seasonFolderMatch[1]) : epInfo.season);
-
-        // Extract show title from filename first
+      if (thisIsSeasonDir) {
+        // We're inside a Season N folder — use grandparent as show name
+        const showTitle = extractShowTitle(parentBase) || cleanTitle(parentBase) || 'Unknown Show';
+        const ep = epInfo ? epInfo.episode : 0;
+        addEpisode(fullPath, entry, stat, ext, showTitle, seasonNum, ep);
+      } else if (epInfo) {
+        // Filename has SxxExx pattern — TV episode
+        // Show title: try filename first, then parent folder
         let showTitle = extractShowTitle(entry.name);
-        if (!showTitle) {
-          if (isSeasonDir) {
-            // Use grandparent folder (the actual show folder)
-            const grandparent = path.basename(path.dirname(dirPath));
-            showTitle = extractShowTitle(grandparent) || cleanTitle(grandparent);
-          } else {
-            showTitle = extractShowTitle(dirBase) || cleanTitle(dirBase);
-          }
-        }
-        if (!showTitle) showTitle = 'Unknown Show';
-
-        const norm = showTitle.toLowerCase().replace(/\s+/g, ' ').trim();
-        if (!showMap.has(norm)) showMap.set(norm, { title: showTitle, episodes: [] });
-
-        showMap.get(norm).episodes.push({
-          id: Buffer.from(fullPath).toString('base64')
-                .replace(/[^a-zA-Z0-9]/g,'').substring(0,20) + '_' + stat.mtimeMs,
-          path: fullPath,
-          filename: entry.name,
-          extension: ext,
-          size: stat.size,
-          sizeHuman: humanSize(stat.size),
-          createdAt: stat.birthtime.toISOString(),
-          modifiedAt: stat.mtime.toISOString(),
-          season: effectiveSeason,
-          episode: epInfo.episode,
-        });
+        if (!showTitle) showTitle = extractShowTitle(dirBase) || cleanTitle(dirBase) || 'Unknown Show';
+        // Override season from filename (most reliable)
+        const effectiveSeason = epInfo.season;
+        addEpisode(fullPath, entry, stat, ext, showTitle, effectiveSeason, epInfo.episode);
       } else {
-        // ── Movie ─────────────────────────────────────────────
-        // Parse title from folder chain (deepest folder with year wins)
-        const parsed = parseMovieName(entry.name, fullPath);
-        if (movieMap.has(fullPath)) continue; // dedup by path
-        movieMap.set(fullPath, {
-          id: Buffer.from(fullPath).toString('base64')
-                .replace(/[^a-zA-Z0-9]/g,'').substring(0,20) + '_' + stat.mtimeMs,
-          type: 'movie',
-          path: fullPath,
-          filename: entry.name,
-          extension: ext,
-          size: stat.size,
-          sizeHuman: humanSize(stat.size),
-          createdAt: stat.birthtime.toISOString(),
-          modifiedAt: stat.mtime.toISOString(),
-          title: parsed.title,
-          displayTitle: parsed.title,
-          year: parsed.year,
-          metadata: null,
-          posterPath: null,
-          status: 'pending',
-        });
+        // No episode pattern — Movie
+        addMovie(fullPath, entry, stat, ext);
       }
     }
   }
@@ -488,9 +486,9 @@ ipcMain.handle('clear-item-cache', async (event, ids) => {
 });
 
 ipcMain.handle('check-files-exist', async (event, { movies, tvShows }) => {
-  // Returns lists of IDs for items whose files no longer exist on disk
-  const missingMovieIds = [];
-  const missingTVIds    = [];
+  const missingMovieIds  = [];
+  const missingTVIds     = [];
+  const missingEpisodes  = {}; // showId -> [missing episode paths]
 
   for (const movie of (movies || [])) {
     if (movie.path && !fs.existsSync(movie.path)) {
@@ -499,16 +497,21 @@ ipcMain.handle('check-files-exist', async (event, { movies, tvShows }) => {
   }
 
   for (const show of (tvShows || [])) {
-    // A show is missing if ALL its episodes are gone
     const eps = show.episodes || [];
-    if (eps.length > 0 && eps.every(e => e.path && !fs.existsSync(e.path))) {
+    const missingPaths = eps
+      .filter(e => e.path && !fs.existsSync(e.path))
+      .map(e => e.path);
+
+    if (missingPaths.length === eps.length && eps.length > 0) {
+      // All episodes gone — remove the whole show
       missingTVIds.push(show.id);
+    } else if (missingPaths.length > 0) {
+      // Some episodes gone — return which paths are missing
+      missingEpisodes[show.id] = missingPaths;
     }
-    // Partially missing — remove individual episodes
-    // (returned separately so renderer can prune episodes without removing the whole show)
   }
 
-  return { missingMovieIds, missingTVIds };
+  return { missingMovieIds, missingTVIds, missingEpisodes };
 });
 
 ipcMain.handle('scan-folders', async (event, folderPaths, excludedPaths, userSettings) => {
