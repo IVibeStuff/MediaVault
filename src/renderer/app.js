@@ -261,13 +261,12 @@ async function loadLibraryData() {
 
     const savedVersion = saved._version || 0;
 
-    // Version too old — keep folders, discard items, ask user to re-scan
-    if (savedVersion < 5 || !saved.tvShows) {
+    // Only discard if library has no version at all (very old format pre-tvShows)
+    if (savedVersion === 0 && !saved.tvShows && !saved.library) {
       state.folders = saved.folders || [];
       updateFolderList();
       showToast('Library format updated — please re-scan your folders.', 'info');
       return;
-      // NOTE: returning here is safe because ALL listeners are already registered above
     }
 
     state.library       = (saved.library       || []).map(sanitiseItem);
@@ -4991,9 +4990,8 @@ async function checkWatchlistNewSeasons(notify = false) {
   if (!items.length) return;
 
   const now      = new Date();
-  const past90   = new Date(now); past90.setDate(now.getDate() - 90);  // extended lookback
+  const past90   = new Date(now); past90.setDate(now.getDate() - 90);
   const future90 = new Date(now); future90.setDate(now.getDate() + 90);
-  const past30   = past90; // alias for movie check
 
   let newCount = 0;
   let changed  = false;
@@ -5028,7 +5026,6 @@ async function checkWatchlistNewSeasons(notify = false) {
             : `📅 S${seasonNum} — ${dateStr}`;
         }
       } else {
-    } else {
         // ── Movie: check theatrical + streaming/digital release dates ──
         const country = (state.settings.countryCode || 'US').toUpperCase();
         const [baseResp, datesResp] = await Promise.all([
@@ -5580,7 +5577,7 @@ async function refreshTVGuideForItem(tmdbId, mediaType) {
 // ═══════════════════════════════════════════════════════
 
 async function checkForUpdates(userInitiated = false) {
-  const CURRENT_VERSION = '1.6.2';
+  const CURRENT_VERSION = await api.getAppVersion().catch(() => '1.6.3');
   const RELEASES_API    = 'https://api.github.com/repos/IVibeStuff/MediaVault/releases/latest';
   const RELEASES_PAGE   = 'https://github.com/IVibeStuff/MediaVault/releases/latest';
 
