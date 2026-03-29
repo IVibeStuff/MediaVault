@@ -653,6 +653,7 @@ ipcMain.handle('load-library', async () => {
   return null;
 });
 ipcMain.handle('open-file',   async (e, p) => shell.openPath(p));
+ipcMain.handle('open-external', async (e, url) => shell.openExternal(url));
 ipcMain.handle('reveal-file', async (e, p) => shell.showItemInFolder(p));
 ipcMain.handle('get-platform', () => process.platform);
 

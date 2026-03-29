@@ -123,6 +123,7 @@ async function init() {
     await checkWatchlistNewSeasons(true);
   });
   document.getElementById('tvguide-refresh-btn')?.addEventListener('click', () => refreshTVGuide(true));
+  document.getElementById('check-updates-btn')?.addEventListener('click', () => checkForUpdates(true));
   document.getElementById('tvguide-clear-btn')?.addEventListener('click', () => {
     if (confirm('Clear all TV Guide notifications?')) {
       state.tvGuideNotifications = [];
@@ -347,6 +348,9 @@ async function loadLibraryData() {
     setTimeout(() => refreshTVGuide(false), 4500);
   }
   updateTVGuideBadge();
+
+  // Silent update check on startup
+  setTimeout(() => checkForUpdates(false), 5000);
 }
 
 function showWelcomeModal() {
@@ -4987,8 +4991,9 @@ async function checkWatchlistNewSeasons(notify = false) {
   if (!items.length) return;
 
   const now      = new Date();
-  const past30   = new Date(now); past30.setDate(now.getDate() - 30);
+  const past90   = new Date(now); past90.setDate(now.getDate() - 90);  // extended lookback
   const future90 = new Date(now); future90.setDate(now.getDate() + 90);
+  const past30   = past90; // alias for movie check
 
   let newCount = 0;
   let changed  = false;
@@ -5014,7 +5019,7 @@ async function checkWatchlistNewSeasons(notify = false) {
         airDate   = latest.air_date ? new Date(latest.air_date) : null;
         seasonNum = latest.season_number;
         if (!airDate) { await new Promise(r => setTimeout(r, 150)); continue; }
-        isNew      = airDate >= past30 && airDate <= now;
+        isNew      = airDate >= past90 && airDate <= now;
         isUpcoming = airDate > now     && airDate <= future90;
         if (isNew || isUpcoming) {
           const dateStr = airDate.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
@@ -5045,8 +5050,9 @@ async function checkWatchlistNewSeasons(notify = false) {
       if (isNew || isUpcoming) {
         const prev = item.newSeasonInfo;
         const prevKey = item.mediaType === 'tv' ? prev?.season : prev?.airDate;
-        const curKey  = item.mediaType === 'tv' ? seasonNum    : airDate?.toISOString();
-        if (!prev || prevKey !== curKey || prev.dismissed) {
+        const curKey  = item.mediaType === 'tv' ? seasonNum    : airDate?.toISOString().split('T')[0];
+        // Re-flag if: no previous flag, different season, or was dismissed on old season
+        if (!prev || prevKey !== curKey || (prev.dismissed && prevKey === curKey)) {
           item.newSeasonInfo = {
             season:    seasonNum,
             airDate:   airDate?.toISOString().split('T')[0],
@@ -5443,7 +5449,7 @@ async function refreshTVGuideForItem(tmdbId, mediaType) {
   if (!state.settings.tmdbKey) return;
 
   const now      = new Date();
-  const past30   = new Date(now); past30.setDate(now.getDate() - 30);
+  const past90   = new Date(now); past90.setDate(now.getDate() - 90);
   const future90 = new Date(now); future90.setDate(now.getDate() + 90);
   const today    = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
@@ -5478,7 +5484,7 @@ async function refreshTVGuideForItem(tmdbId, mediaType) {
         for (const ep of (episodes || [])) {
           if (!ep.air_date) continue;
           const airDate = new Date(ep.air_date);
-          if (airDate < past30 || airDate > future90) continue;
+          if (airDate < past90 || airDate > future90) continue;
           const id = `tv_${tmdbId}_s${season.season_number}e${ep.episode_number}`;
           if (existingIds.has(id)) continue;
           const detail = `S${String(season.season_number).padStart(2,'0')}E${String(ep.episode_number).padStart(2,'0')} — ${ep.name || 'Episode '+ep.episode_number}`;
@@ -5499,7 +5505,7 @@ async function refreshTVGuideForItem(tmdbId, mediaType) {
       const data = await resp.json();
       if (!data.release_date) return;
       const airDate = new Date(data.release_date);
-      if (airDate < past30 || airDate > future90) return;
+      if (airDate < past90 || airDate > future90) return;
       const id = `movie_${tmdbId}`;
       if (existingIds.has(id)) return;
       const diff = Math.floor((airDate - today) / 86400000);
@@ -5521,4 +5527,118 @@ async function refreshTVGuideForItem(tmdbId, mediaType) {
     if (state.currentView === 'tvguide') renderTVGuide();
     showToast(`TV Guide: ${added} new item${added !== 1 ? 's' : ''} added for "${item.title}"`, 'info');
   }
+}
+
+// ═══════════════════════════════════════════════════════
+// UPDATE CHECKER
+// ═══════════════════════════════════════════════════════
+
+async function checkForUpdates(userInitiated = false) {
+  const CURRENT_VERSION = '1.6.2';
+  const RELEASES_API    = 'https://api.github.com/repos/IVibeStuff/MediaVault/releases/latest';
+  const RELEASES_PAGE   = 'https://github.com/IVibeStuff/MediaVault/releases/latest';
+
+  try {
+    const resp = await fetch(RELEASES_API, {
+      headers: { 'Accept': 'application/vnd.github.v3+json' }
+    });
+
+    if (!resp.ok) {
+      if (userInitiated) showToast('Could not reach GitHub — check your connection', 'error');
+      return;
+    }
+
+    const data = await resp.json();
+    const latest = (data.tag_name || '').replace(/^v/, '');
+
+    if (!latest) {
+      if (userInitiated) showToast('Could not determine latest version', 'error');
+      return;
+    }
+
+    // Compare versions semantically
+    const parseVer = v => v.split('.').map(Number);
+    const [maj, min, pat]    = parseVer(latest);
+    const [cMaj, cMin, cPat] = parseVer(CURRENT_VERSION);
+    const isNewer = maj > cMaj || (maj === cMaj && min > cMin) || (maj === cMaj && min === cMin && pat > cPat);
+
+    if (isNewer) {
+      // Find the .exe asset if available
+      const exeAsset = (data.assets || []).find(a => a.name.endsWith('.exe'));
+      const downloadUrl = exeAsset ? exeAsset.browser_download_url : RELEASES_PAGE;
+
+      // Show a persistent update banner
+      showUpdateBanner(`v${latest}`, downloadUrl, data.body || '');
+    } else if (userInitiated) {
+      showToast(`MediaVault is up to date (v${CURRENT_VERSION})`, 'success');
+    }
+
+  } catch (e) {
+    if (userInitiated) showToast('Update check failed — ' + e.message, 'error');
+  }
+}
+
+function showUpdateBanner(version, downloadUrl, releaseNotes) {
+  // Remove any existing banner
+  document.getElementById('update-banner')?.remove();
+
+  const banner = document.createElement('div');
+  banner.id = 'update-banner';
+  banner.style.cssText = [
+    'position:fixed',
+    'bottom:24px',
+    'right:24px',
+    'z-index:900',
+    'background:var(--bg-1)',
+    'border:1px solid var(--accent)',
+    'border-radius:12px',
+    'padding:16px 20px',
+    'max-width:320px',
+    'box-shadow:0 8px 32px rgba(0,0,0,.5)',
+    'display:flex',
+    'flex-direction:column',
+    'gap:10px',
+    'animation:slideInRight .3s cubic-bezier(.4,0,.2,1)',
+  ].join(';');
+
+  // Trim release notes to first 2 lines
+  const notes = releaseNotes
+    ? releaseNotes.split('\n').filter(l => l.trim()).slice(0, 2).join(' · ')
+    : '';
+
+  banner.innerHTML = `
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">
+      <div>
+        <div style="font-size:13px;font-weight:700;color:var(--t0);margin-bottom:3px;">
+          MediaVault ${version} available
+        </div>
+        ${notes ? `<div style="font-size:11px;color:var(--t2);line-height:1.5;">${esc(notes.substring(0, 120))}${notes.length > 120 ? '…' : ''}</div>` : ''}
+      </div>
+      <button id="update-banner-close" style="background:none;border:none;color:var(--t2);cursor:pointer;font-size:16px;line-height:1;flex-shrink:0;padding:0;">×</button>
+    </div>
+    <div style="display:flex;gap:8px;">
+      <a href="${downloadUrl}" id="update-download-btn" style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 14px;background:var(--accent);color:#fff;border-radius:var(--radius-sm);font-size:12px;font-weight:600;text-decoration:none;transition:opacity .15s;">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download ${version}
+      </a>
+      <a href="https://github.com/IVibeStuff/MediaVault/releases" style="display:inline-flex;align-items:center;padding:8px 12px;background:var(--bg-3);color:var(--t1);border:1px solid var(--border-mid);border-radius:var(--radius-sm);font-size:12px;font-weight:500;text-decoration:none;">
+        Release notes
+      </a>
+    </div>`;
+
+  document.body.appendChild(banner);
+
+  // Handle link clicks — open in system browser via Electron shell
+  banner.querySelectorAll('a').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      api.openExternal(a.href);
+    });
+  });
+
+  document.getElementById('update-banner-close').addEventListener('click', () => {
+    banner.style.opacity = '0';
+    banner.style.transition = 'opacity .2s';
+    setTimeout(() => banner.remove(), 200);
+  });
 }

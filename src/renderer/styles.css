@@ -1807,3 +1807,9 @@ body.platform-darwin .titlebar-left { padding-left: 60px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── Update banner animation ── */
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(20px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
