@@ -1,4 +1,4 @@
-# MediaVault v1.6.6
+# MediaVault v1.7.0
 
 A sleek desktop media manager for Windows with TMDB/OMDB metadata, poster art, episode tracking, watchlist, and streaming availability.
 
@@ -43,7 +43,7 @@ npm run build
 Output:
 ```
 dist/
-  MediaVault-Setup-1.6.6.exe
+  MediaVault-Setup-1.7.0.exe
 ```
 
 ### Step 4 — Install
@@ -62,7 +62,8 @@ directory, creates a Desktop shortcut and a Start Menu entry under MediaVault.
 ## User data location
 ```
 C:\Users\<you>\.mediavault\
-  library.json      ← library, watchlist, settings
+  library.json      ← library, watchlist, settings (no API keys)
+  keys.enc          ← API keys, encrypted via OS credential store
   cache\            ← poster art, headshots, metadata
 ```
 This folder is never touched by the installer or uninstaller.
@@ -74,6 +75,9 @@ This folder is never touched by the installer or uninstaller.
 - **OMDB** (free): https://www.omdbapi.com/apikey.aspx
 
 Enter both in Settings → API Keys after first launch.
+
+API keys are stored encrypted using Electron's `safeStorage` (OS credential
+store). They are never written to `library.json` or `localStorage`.
 
 ---
 

@@ -1,9 +1,35 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, protocol, net, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const https = require('https');
 const http = require('http');
+
+// ─── Constants ────────────────────────────────────────────
+// Defined at the top so all IPC handlers and helpers can reference them.
+const CACHE_DIR = path.join(os.homedir(), '.mediavault', 'cache');
+const DB_PATH   = path.join(os.homedir(), '.mediavault', 'library.json');
+const KEYS_PATH = path.join(os.homedir(), '.mediavault', 'keys.enc');
+
+// ─── Custom protocol: media:// ────────────────────────────
+// Serves local image files (posters, headshots) without requiring
+// webSecurity:false. Only paths strictly inside CACHE_DIR are served;
+// any path-traversal attempt returns 403.
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'media', privileges: { secure: true, standard: true, supportFetchAPI: true } }
+]);
+
+function registerMediaProtocol() {
+  protocol.handle('media', (request) => {
+    const url = new URL(request.url);
+    const relative = decodeURIComponent(url.pathname.replace(/^\//, ''));
+    const resolved = path.resolve(CACHE_DIR, relative);
+    if (!resolved.startsWith(CACHE_DIR + path.sep) && resolved !== CACHE_DIR) {
+      return new Response('Forbidden', { status: 403 });
+    }
+    return net.fetch('file://' + resolved);
+  });
+}
 
 let mainWindow;
 
@@ -16,7 +42,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false, contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
-      webSecurity: false
+      webSecurity: true
     },
     show: false
   });
@@ -25,7 +51,7 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => { registerMediaProtocol(); createWindow(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (!mainWindow) createWindow(); });
 
@@ -121,19 +147,14 @@ function extractEpisodeInfo(filename) {
   let name = filename.replace(/\.[^/.]+$/, '');
 
   // Strip codec/quality tags FIRST so their digits don't trigger episode matching.
-  // Examples that would otherwise false-match:
-  //   H.264  → "E264" → episode 264
-  //   DDP2.0 → "P2" near digits
-  //   x265   → nothing but prevents confusion
-  //   DD5.1  → "5" near "1" could confuse NxNN pattern
   name = name
-    .replace(/\bH[._]?26[45]\b/gi, '')      // H.264, H265, H.265
-    .replace(/\bx26[45]\b/gi, '')            // x264, x265
+    .replace(/\bH[._]?26[45]\b/gi, '')
+    .replace(/\bx26[45]\b/gi, '')
     .replace(/\bHEVC\b/gi, '')
-    .replace(/\bDDP?\d[._]\d\b/gi, '')     // DD5.1, DDP2.0, DD2.0
-    .replace(/\bAAC\d[._]\d\b/gi, '')      // AAC2.0, AAC5.1
+    .replace(/\bDDP?\d[._]\d\b/gi, '')
+    .replace(/\bAAC\d[._]\d\b/gi, '')
     .replace(/\bAVC\b/gi, '')
-    .replace(/\b\d{3,4}p\b/gi, '')          // 1080p, 720p, 2160p
+    .replace(/\b\d{3,4}p\b/gi, '')
     .replace(/\b4K\b/gi, '')
     .replace(/\bUHD\b/gi, '');
 
@@ -154,46 +175,27 @@ function extractEpisodeInfo(filename) {
 
 // ─── Extract show title from a messy folder/filename ─────
 function extractShowTitle(name) {
-  // Strip episode/season patterns and EVERYTHING after the first one found.
-  // This is the primary grouping key — must be aggressive so that:
-  //   "Gold.Rush.S16E06.The.Weasel"  → "Gold Rush"
-  //   "Gold.Rush.S16E07.1080p"        → "Gold Rush"
-  //   "Stargate.SG1.S08E01"           → "Stargate SG1"  (SG1 has no year, keep it)
-  //   "Jeremiah.S01E01"               → "Jeremiah"
   let t = name
-    // Remove SxxExx and everything after (most common)
     .replace(/[._\s\-][Ss]\d{1,2}[Ee]\d{1,3}.*/i, '')
     .replace(/[Ss]\d{1,2}[Ee]\d{1,3}.*/i, '')
-    // Remove NxNN format
     .replace(/\d{1,2}x\d{2,3}.*/i, '')
-    // Remove Ep/Episode N and everything after
     .replace(/[._\s\-][Ee]p(?:isode)?[\s._-]*\d{1,3}.*/i, '')
-    // Remove Exx standalone
     .replace(/[._\s][Ee]\d{2,3}(?:[^0-9]|$).*/i, '')
-    // Remove Season N and everything after
     .replace(/[._\s\-][Ss]eason[\s._-]?\d+.*/i, '')
     .replace(/[Ss]eason[\s._-]?\d+.*/i, '')
-    // Remove SNN-SNN range patterns (e.g. S01-S02) and everything after
     .replace(/[._\s\-][Ss]\d{1,2}[-–][Ss]\d{1,2}.*/i, '')
     .replace(/[Ss]\d{1,2}[-–][Ss]\d{1,2}.*/i, '')
-    // Remove year and everything after (years in show names are rare)
     .replace(/\b(19|20)\d{2}\b.*/i, '')
-    // Strip any trailing unclosed bracket or punctuation
     .replace(/[\s([{.,_-]+$/, '');
   const cleaned = cleanTitle(t);
-  // If cleaning wiped everything, fall back to the original cleaned name
   return cleaned || cleanTitle(name.replace(/[._\-]+/g,' ').trim());
 }
 
 
 // ─── Movie name parser ────────────────────────────────────
-// Walks up the folder chain to find the deepest folder containing a year.
-// Falls back to parsing the filename itself.
 function parseMovieName(filename, filePath) {
   let name = filename.replace(/\.[^/.]+$/, '');
 
-  // If filename has episode pattern it should have been caught already,
-  // but double-check and return a safe fallback
   const tvM = name.match(/[Ss](\d{1,2})[Ee](\d{1,3})/i);
   if (tvM) {
     return { type:'tv_episode', title: cleanTitle(extractShowTitle(name)),
@@ -201,13 +203,12 @@ function parseMovieName(filename, filePath) {
              season: parseInt(tvM[1]), episode: parseInt(tvM[2]) };
   }
 
-  // Walk up folder chain — deepest folder with year wins
   let bestTitle = null, bestYear = null;
   if (filePath) {
     const parts = filePath.replace(/\\/g, '/').split('/');
     for (let i = parts.length - 2; i >= Math.max(0, parts.length - 5); i--) {
       const fn = parts[i];
-      const fm = fn.match(/^(.*?)[\s._\-]*(\(?(?:19|20)\d{2}\)?)[\s._\-]/);
+      const fm = fn.match(/^(.*?)[\s._\-]*(\(?(?:19|20)\d{2}\)?[\s._\-])/);
       if (fm) {
         const yr = parseInt(fm[2].replace(/[()]/g,''));
         if (yr >= 1880 && yr <= 2030) {
@@ -220,7 +221,7 @@ function parseMovieName(filename, filePath) {
   }
 
   if (!bestTitle) {
-    const mm = name.match(/^(.*?)[\s._\-]*(\(?\d{4}\)?)[\s._\-]*(.*)?$/);
+    const mm = name.match(/^(.*?)[\s._\-]*(\(?\d{4}\)?[\s._\-]*(.*)?$)/);
     let title = name, year = null;
     if (mm && mm[2]) {
       const yr = parseInt(mm[2].replace(/[()]/g,''));
@@ -234,24 +235,12 @@ function parseMovieName(filename, filePath) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// SCANNER — hybrid approach
-//
-// Philosophy:
-//   Walk everything recursively. For each video file:
-//   1. If inside a named Season folder → use grandparent as show name,
-//      season number from folder name
-//   2. If filename has SxxExx pattern → TV show, title from filename
-//   3. Otherwise → Movie
-//
-//   This handles all real-world structures without trying to classify
-//   folders as "show roots" which is unreliable for mixed containers.
+// SCANNER
 // ═══════════════════════════════════════════════════════════
 
 function isSeasonFolder(name) {
-  // Exclude range patterns — show pack folders
   if (/season[\s._-]?\d+[\s._-]*[-–][\s._-]*\d+/i.test(name)) return false;
   if (/\bS\d{1,2}[-–]S\d{1,2}\b/i.test(name)) return false;
-  // Must START with Season/S — 'Flashpoint Season 2' is a show folder, not a season folder
   return /^season[\s._-]?\d+/i.test(name) ||
          /^s\d{1,2}([\s._-]|$)/i.test(name);
 }
@@ -279,7 +268,13 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
   function addEpisode(fullPath, entry, stat, ext, showTitle, seasonNum, episodeNum) {
     const norm = showTitle.toLowerCase().replace(/\s+/g, ' ').trim();
     if (!showMap.has(norm)) showMap.set(norm, { title: showTitle, episodes: [] });
-    showMap.get(norm).episodes.push({
+    const group = showMap.get(norm);
+    // Guard against the same file being registered twice (e.g. from overlapping
+    // watched folders, symlinks, or any other scanner path that visits the same
+    // fullPath more than once).
+    const fullPathLower = fullPath.toLowerCase();
+    if (group.episodes.some(e => e.path.toLowerCase() === fullPathLower)) return;
+    group.episodes.push({
       id: Buffer.from(fullPath).toString('base64')
             .replace(/[^a-zA-Z0-9]/g, '').substring(0, 20) + '_' + stat.mtimeMs,
       path: fullPath, filename: entry.name, extension: ext,
@@ -314,11 +309,9 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
     const dirBase = path.basename(dirPath);
     const parentBase = path.basename(path.dirname(dirPath));
 
-    // Determine if this directory is a season folder
     const thisIsSeasonDir = isSeasonFolder(dirBase);
     const seasonNum = thisIsSeasonDir ? seasonFolderNumber(dirBase) : null;
 
-    // Collect video files for junk detection
     const dirVideos = [];
     for (const e of entries) {
       if (!e.isFile()) continue;
@@ -340,7 +333,14 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
 
       if (!entry.isFile()) continue;
       const ext = path.extname(entry.name).toLowerCase();
-      if (!VIDEO_EXT.has(ext)) continue;
+      // Accept known video extensions. Also accept extensionless files whose OWN
+      // name contains an episode pattern (e.g. a file named exactly like its folder
+      // but without an extension). We deliberately do NOT fall back to checking
+      // dirBase here — that would accept every extensionless sidecar (Subs, poster,
+      // RARBG notices, etc.) in any episode-named folder.
+      const isKnownExt = VIDEO_EXT.has(ext);
+      const isExtensionlessEpisode = !ext && extractEpisodeInfo(entry.name) !== null;
+      if (!isKnownExt && !isExtensionlessEpisode) continue;
 
       let stat;
       try { stat = fs.statSync(fullPath); } catch { continue; }
@@ -348,22 +348,25 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
       if (folderJunk.has(entry.name)) continue;
 
       const epInfo = extractEpisodeInfo(entry.name);
+      // Fallback: if the file itself has no episode pattern, try the containing
+      // folder name. This handles releases packed as one-episode folders, e.g.:
+      //   Seriaalid/Gold Rush S16E21 1000-Ounce Week.../video.mkv
+      const dirEpInfo = epInfo ? null : extractEpisodeInfo(dirBase);
 
       if (thisIsSeasonDir) {
-        // We're inside a Season N folder — use grandparent as show name
         const showTitle = extractShowTitle(parentBase) || cleanTitle(parentBase) || 'Unknown Show';
         const ep = epInfo ? epInfo.episode : 0;
         addEpisode(fullPath, entry, stat, ext, showTitle, seasonNum, ep);
       } else if (epInfo) {
-        // Filename has SxxExx pattern — TV episode
-        // Show title: try filename first, then parent folder
         let showTitle = extractShowTitle(entry.name);
         if (!showTitle) showTitle = extractShowTitle(dirBase) || cleanTitle(dirBase) || 'Unknown Show';
-        // Override season from filename (most reliable)
         const effectiveSeason = epInfo.season;
         addEpisode(fullPath, entry, stat, ext, showTitle, effectiveSeason, epInfo.episode);
+      } else if (dirEpInfo) {
+        // Episode info came from the folder name — use folder for both title and episode.
+        const showTitle = extractShowTitle(dirBase) || cleanTitle(dirBase) || 'Unknown Show';
+        addEpisode(fullPath, entry, stat, ext, showTitle, dirEpInfo.season, dirEpInfo.episode);
       } else {
-        // No episode pattern — Movie
         addMovie(fullPath, entry, stat, ext);
       }
     }
@@ -371,10 +374,9 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
 
   walk(rootPath);
 
-  // ── Merge multi-part movies (Cd1/Cd2, Part1/Part2, Disc1/Disc2) ────────────
-  // Pattern: same base title + year, suffix differs only by part indicator
+  // ── Merge multi-part movies ────────────────────────────────────────────────
   const PART_RE = /[\s._\-]*(cd|disc|disk|part|pt)[\s._\-]*(\d+)$/i;
-  const mergedMovies = new Map(); // mergeKey → lead movie entry
+  const mergedMovies = new Map();
   for (const [filePath, movie] of movieMap) {
     const rawTitle = (movie.title || '').trim();
     const partM = rawTitle.match(PART_RE);
@@ -382,7 +384,6 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
       const baseTitle = rawTitle.replace(PART_RE, '').trim();
       const mergeKey  = (baseTitle + '_' + (movie.year || '')).toLowerCase();
       if (mergedMovies.has(mergeKey)) {
-        // Append this part to the existing entry
         const lead = mergedMovies.get(mergeKey);
         if (!lead.parts) lead.parts = [{ path: lead.path, filename: lead.filename, size: lead.size, sizeHuman: lead.sizeHuman }];
         lead.parts.push({ path: movie.path, filename: movie.filename, size: movie.size, sizeHuman: movie.sizeHuman });
@@ -390,17 +391,14 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
         lead.sizeHuman = humanSize(lead.size);
         lead.filename = `${lead.parts.length} parts`;
       } else {
-        // First part seen — normalise title, store as lead
         const lead = { ...movie, title: baseTitle, displayTitle: baseTitle };
         mergedMovies.set(mergeKey, lead);
       }
     } else {
-      // No part suffix — store as-is using file path as key
       mergedMovies.set(filePath, movie);
     }
   }
 
-  // Convert showMap to TV show objects
   const tvShows = [];
   for (const [norm, group] of showMap) {
     const eps = group.episodes.sort(
@@ -408,7 +406,6 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
     );
     const totalSize = eps.reduce((s,e) => s + e.size, 0);
     const seasons   = new Set(eps.map(e => e.season));
-    // Use the deepest common ancestor path as the show root (stable regardless of episode order)
     const allDirs = eps.map(e => path.dirname(e.path));
     const showRootPath = allDirs.reduce((common, dir) => {
       let c = common;
@@ -416,7 +413,6 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
       return c || common;
     }, allDirs[0]);
     tvShows.push({
-      // ID based only on normalised title — stable across rescans and path changes
       id: 'tv_' + Buffer.from(
             (group.title || 'unknown').toLowerCase().replace(/[^a-z0-9]/g, '')
           ).toString('base64').replace(/[^a-zA-Z0-9]/g,'').substring(0,24),
@@ -471,7 +467,6 @@ ipcMain.handle('read-file', async (event, { filters }) => {
 });
 
 ipcMain.handle('clear-item-cache', async (event, ids) => {
-  // Delete cached metadata and poster files for the given item IDs
   try {
     const files = fs.readdirSync(CACHE_DIR);
     for (const id of (ids || [])) {
@@ -488,7 +483,7 @@ ipcMain.handle('clear-item-cache', async (event, ids) => {
 ipcMain.handle('check-files-exist', async (event, { movies, tvShows }) => {
   const missingMovieIds  = [];
   const missingTVIds     = [];
-  const missingEpisodes  = {}; // showId -> [missing episode paths]
+  const missingEpisodes  = {};
 
   for (const movie of (movies || [])) {
     if (movie.path && !fs.existsSync(movie.path)) {
@@ -503,10 +498,8 @@ ipcMain.handle('check-files-exist', async (event, { movies, tvShows }) => {
       .map(e => e.path);
 
     if (missingPaths.length === eps.length && eps.length > 0) {
-      // All episodes gone — remove the whole show
       missingTVIds.push(show.id);
     } else if (missingPaths.length > 0) {
-      // Some episodes gone — return which paths are missing
       missingEpisodes[show.id] = missingPaths;
     }
   }
@@ -528,25 +521,30 @@ ipcMain.handle('scan-folders', async (event, folderPaths, excludedPaths, userSet
   return { movies: allMovies, tvShows: allTVShows };
 });
 
-// ─── Cache ────────────────────────────────────────────────
-const CACHE_DIR = path.join(os.homedir(), '.mediavault', 'cache');
-const DB_PATH   = path.join(os.homedir(), '.mediavault', 'library.json');
+// ─── Cache helpers ────────────────────────────────────────
 function ensureCacheDir() {
   if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
-function downloadImage(url, dest) {
+
+// downloadImage: follows redirects up to MAX_REDIRECTS deep to prevent loops.
+const MAX_REDIRECTS = 5;
+function downloadImage(url, dest, _depth = 0) {
   return new Promise((resolve, reject) => {
+    if (_depth > MAX_REDIRECTS) { reject(new Error('Too many redirects')); return; }
     const proto = url.startsWith('https') ? https : http;
     const file = fs.createWriteStream(dest);
     proto.get(url, (res) => {
       if (res.statusCode === 301 || res.statusCode === 302) {
-        file.close(); downloadImage(res.headers.location, dest).then(resolve).catch(reject); return;
+        file.close();
+        downloadImage(res.headers.location, dest, _depth + 1).then(resolve).catch(reject);
+        return;
       }
       res.pipe(file);
       file.on('finish', () => { file.close(); resolve(dest); });
     }).on('error', err => { fs.unlink(dest, () => {}); reject(err); });
   });
 }
+
 function httpsGet(url) {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith('https') ? https : http;
@@ -558,11 +556,50 @@ function httpsGet(url) {
   });
 }
 
+// ─── API key storage (safeStorage) ───────────────────────
+// Keys are encrypted at rest and never written to library.json.
+// The renderer passes keys to main only when saving; main reads
+// them from disk for all outbound API calls.
+function loadApiKeys() {
+  try {
+    if (!fs.existsSync(KEYS_PATH)) return { tmdbKey: '', omdbKey: '' };
+    const buf = fs.readFileSync(KEYS_PATH);
+    const json = safeStorage.decryptString(buf);
+    return JSON.parse(json);
+  } catch { return { tmdbKey: '', omdbKey: '' }; }
+}
+
+function saveApiKeys(keys) {
+  try {
+    const dir = path.dirname(KEYS_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const buf = safeStorage.encryptString(JSON.stringify(keys));
+    fs.writeFileSync(KEYS_PATH, buf);
+    return true;
+  } catch { return false; }
+}
+
+ipcMain.handle('load-api-keys', async () => {
+  if (!safeStorage.isEncryptionAvailable()) return { tmdbKey: '', omdbKey: '' };
+  return loadApiKeys();
+});
+
+ipcMain.handle('save-api-keys', async (event, { tmdbKey, omdbKey }) => {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  return saveApiKeys({ tmdbKey: tmdbKey || '', omdbKey: omdbKey || '' });
+});
+
+// Internal helper — keys never travel via IPC to the renderer for API calls.
+function getApiKeys() {
+  if (!safeStorage.isEncryptionAvailable()) return { tmdbKey: '', omdbKey: '' };
+  return loadApiKeys();
+}
+
 // ─── Metadata fetching ────────────────────────────────────
-ipcMain.handle('fetch-metadata', async (event, item, tmdbKey, omdbKey) => {
+// Keys are read from disk here; the renderer no longer passes them.
+ipcMain.handle('fetch-metadata', async (event, item) => {
   ensureCacheDir();
-  // Use item.id (file-path hash) as the primary cache key — unique per file,
-  // never collides between different titles. Fall back to title+year only if id missing.
+  const { tmdbKey, omdbKey } = getApiKeys();
   const itemId  = (item.id || '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 40);
   const safeName = (item.title || 'unknown').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
   const cacheKey = itemId
@@ -645,15 +682,34 @@ ipcMain.handle('fetch-metadata', async (event, item, tmdbKey, omdbKey) => {
 ipcMain.handle('save-library', async (event, library) => {
   const dir = path.dirname(DB_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(DB_PATH, JSON.stringify(library, null, 2));
-  return true;
+  // Strip API keys in case an old client version includes them in settings.
+  if (library && library.settings) {
+    delete library.settings.tmdbKey;
+    delete library.settings.omdbKey;
+  }
+  const tmp = DB_PATH + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(library, null, 2));
+    fs.renameSync(tmp, DB_PATH);
+    return { ok: true };
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    return { ok: false, error: e.message };
+  }
 });
+
 ipcMain.handle('load-library', async () => {
   if (fs.existsSync(DB_PATH)) { try { return JSON.parse(fs.readFileSync(DB_PATH, 'utf8')); } catch { return null; } }
   return null;
 });
+
 ipcMain.handle('open-file',   async (e, p) => shell.openPath(p));
-ipcMain.handle('open-external', async (e, url) => shell.openExternal(url));
+ipcMain.handle('open-external', async (e, url) => {
+  // Only allow http/https to prevent javascript:, file:, shell: etc.
+  if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+    return shell.openExternal(url);
+  }
+});
 ipcMain.handle('get-app-version', async () => app.getVersion());
 ipcMain.handle('reveal-file', async (e, p) => shell.showItemInFolder(p));
 ipcMain.handle('get-platform', () => process.platform);
@@ -680,7 +736,8 @@ ipcMain.handle('fetch-headshots', async (event, castFull, crewFull) => {
 });
 
 // ─── Actor search ─────────────────────────────────────────
-ipcMain.handle('search-person', async (event, name, tmdbKey) => {
+ipcMain.handle('search-person', async (event, name) => {
+  const { tmdbKey } = getApiKeys();
   if (!tmdbKey) return { error: 'No TMDB key' };
   try {
     const result = await httpsGet(`https://api.themoviedb.org/3/search/person?api_key=${tmdbKey}&query=${encodeURIComponent(name)}`);
@@ -729,8 +786,6 @@ ipcMain.handle('search-person', async (event, name, tmdbKey) => {
         voteAverage: c.vote_average ? c.vote_average.toFixed(1) : null,
         episodeCount: c.episode_count || null,
       }));
-    // Also extract directing/writing crew credits for library cross-reference
-    // These are returned separately so the UI can match local files against them
     const CREW_JOBS = new Set(['Director','Creator','Writer','Screenplay','Story','Producer']);
     const crewCredits = (credits.crew || [])
       .filter(c => CREW_JOBS.has(c.job))
@@ -762,7 +817,8 @@ ipcMain.handle('search-person', async (event, name, tmdbKey) => {
 });
 
 // ─── Watch providers ──────────────────────────────────────
-ipcMain.handle('get-watch-providers', async (event, tmdbId, mediaType, tmdbKey, countryCode) => {
+ipcMain.handle('get-watch-providers', async (event, tmdbId, mediaType, countryCode) => {
+  const { tmdbKey } = getApiKeys();
   if (!tmdbKey) return {};
   try {
     const result = await httpsGet(`https://api.themoviedb.org/3/${mediaType}/${tmdbId}/watch/providers?api_key=${tmdbKey}`);
@@ -795,7 +851,8 @@ ipcMain.handle('fetch-film-posters', async (event, films) => {
 });
 
 // ─── Remap search ─────────────────────────────────────────
-ipcMain.handle('remap-search', async (event, query, mediaType, tmdbKey) => {
+ipcMain.handle('remap-search', async (event, query, mediaType) => {
+  const { tmdbKey } = getApiKeys();
   if (!tmdbKey) return { error: 'No TMDB key' };
   try {
     let directId = null; let directType = mediaType;
@@ -820,8 +877,10 @@ ipcMain.handle('remap-search', async (event, query, mediaType, tmdbKey) => {
 });
 
 // ─── Remap apply ──────────────────────────────────────────
-ipcMain.handle('remap-apply', async (event, item, tmdbId, mediaType, tmdbKey, omdbKey) => {
+ipcMain.handle('remap-apply', async (event, item, tmdbId, mediaType) => {
   ensureCacheDir();
+  const { tmdbKey, omdbKey } = getApiKeys();
+  if (!tmdbKey) return { error: 'No TMDB key' };
   const safeName = (item.title || 'unknown').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 40);
   const oldKey = item.type === 'tv' ? `tv_${safeName}` : `mv_${safeName}_${item.year || ''}`;
   try { fs.unlinkSync(path.join(CACHE_DIR, `${oldKey}_meta.json`)); } catch {}
@@ -879,11 +938,11 @@ ipcMain.handle('remap-apply', async (event, item, tmdbId, mediaType, tmdbKey, om
   } catch (err) { return { error: err.message }; }
 });
 
-// ─── TMDB title search (non-library content) ──────────────
-ipcMain.handle('search-title', async (event, query, tmdbKey, omdbKey) => {
+// ─── TMDB title search ────────────────────────────────────
+ipcMain.handle('search-title', async (event, query) => {
+  const { tmdbKey, omdbKey } = getApiKeys();
   if (!tmdbKey) return { error: 'No TMDB key' };
   try {
-    // Search both movie and tv
     const [mRes, tRes] = await Promise.all([
       httpsGet(`https://api.themoviedb.org/3/search/movie?api_key=${tmdbKey}&query=${encodeURIComponent(query)}&page=1`),
       httpsGet(`https://api.themoviedb.org/3/search/tv?api_key=${tmdbKey}&query=${encodeURIComponent(query)}&page=1`),
@@ -904,8 +963,9 @@ ipcMain.handle('search-title', async (event, query, tmdbKey, omdbKey) => {
   } catch (err) { return { error: err.message }; }
 });
 
-// ─── Full title detail for TMDB search page ───────────────
-ipcMain.handle('fetch-title-detail', async (event, tmdbId, mediaType, tmdbKey, omdbKey, countryCode) => {
+// ─── Full title detail ────────────────────────────────────
+ipcMain.handle('fetch-title-detail', async (event, tmdbId, mediaType, countryCode) => {
+  const { tmdbKey, omdbKey } = getApiKeys();
   if (!tmdbKey) return { error: 'No TMDB key' };
   try {
     let meta = {};
@@ -951,7 +1011,6 @@ ipcMain.handle('fetch-title-detail', async (event, tmdbId, mediaType, tmdbKey, o
         }
       } catch {}
     }
-    // Fetch streaming providers
     try {
       const wp = await httpsGet(`https://api.themoviedb.org/3/${mediaType}/${tmdbId}/watch/providers?api_key=${tmdbKey}`);
       const region = (wp.results || {})[countryCode || 'US'] || (wp.results || {})['US'] || {};
@@ -962,5 +1021,22 @@ ipcMain.handle('fetch-title-detail', async (event, tmdbId, mediaType, tmdbKey, o
       };
     } catch {}
     return meta;
+  } catch (err) { return { error: err.message }; }
+});
+
+// ─── Generic TMDB proxy ───────────────────────────────────
+// Allows the renderer to call TMDB endpoints without ever seeing
+// the API key. The renderer passes only the path + params (no key).
+ipcMain.handle('tmdb-get', async (event, pathAndQuery) => {
+  const { tmdbKey } = getApiKeys();
+  if (!tmdbKey) return { error: 'No TMDB key' };
+  // pathAndQuery must start with a known TMDB path prefix — no external URLs.
+  if (typeof pathAndQuery !== 'string' || !/^\/3\/[a-zA-Z0-9/._-]+(\?[^]*)?$/.test(pathAndQuery)) {
+    return { error: 'Invalid path' };
+  }
+  const sep = pathAndQuery.includes('?') ? '&' : '?';
+  const url = `https://api.themoviedb.org${pathAndQuery}${sep}api_key=${tmdbKey}`;
+  try {
+    return await httpsGet(url);
   } catch (err) { return { error: err.message }; }
 });

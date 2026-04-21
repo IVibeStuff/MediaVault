@@ -1,10 +1,8 @@
-; MediaVault NSIS installer customisation
-; Adds file association and registry entries
+; MediaVault NSIS installer script
+; Writes a version registry key on install and removes it on uninstall.
 
 !macro customInstall
-  ; Register .mkv, .mp4, .avi association (optional, non-destructive)
-  WriteRegStr HKCU "Software\MediaVault" "InstallPath" "$INSTDIR"
-  WriteRegStr HKCU "Software\MediaVault" "Version" "1.0.0"
+  WriteRegStr HKCU "Software\MediaVault" "Version" "${VERSION}"
 !macroend
 
 !macro customUnInstall

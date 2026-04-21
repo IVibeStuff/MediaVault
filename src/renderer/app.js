@@ -15,7 +15,7 @@ const state = {
   hiddenFolders: [],
   hiddenItems: [],
   settings: {
-    tmdbKey: '', omdbKey: '',
+    tmdbKey: '', omdbKey: '',  // Not stored here — kept only for legacy migration check on load
     autoFetch: true, dlPosters: true,
     theme: 'dark', accentColor: '#7c5cfc',
     fontFamily: 'Outfit', fontSize: 'medium',
@@ -85,6 +85,12 @@ async function init() {
 
   loadSettings();
   applyTheme();
+
+  // Load API keys from encrypted storage into state for runtime guard checks.
+  // These are never written back to library.json — they are runtime-only.
+  const { tmdbKey, omdbKey } = await api.loadApiKeys().catch(() => ({ tmdbKey: '', omdbKey: '' }));
+  state.settings.tmdbKey = tmdbKey;
+  state.settings.omdbKey = omdbKey;
 
   // ══════════════════════════════════════════════════════
   // STEP 1 — Register ALL event listeners FIRST.
@@ -223,7 +229,7 @@ async function init() {
   state.activeItem = null;
 
   // Settings and customisation
-  initSettings();
+  initSettings(tmdbKey, omdbKey);
   initCustomisation();
 
   // ══════════════════════════════════════════════════════
@@ -272,6 +278,21 @@ async function loadLibraryData() {
 
     state.library       = (saved.library       || []).map(sanitiseItem);
     state.tvShows       = (saved.tvShows       || []).map(sanitiseItem);
+
+    // Deduplicate episodes within each show on load (case-insensitive path comparison).
+    // Cleans up any duplicates that may have been introduced by previous merges.
+    state.tvShows.forEach(show => {
+      if (!Array.isArray(show.episodes)) return;
+      const seen = new Set();
+      show.episodes = show.episodes.filter(e => {
+        const key = (e.path || '').toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      show.episodeCount = show.episodes.length;
+      show.seasonCount  = new Set(show.episodes.map(e => e.season)).size;
+    });
     state.folders       = saved.folders       || [];
     state.hiddenFolders = saved.hiddenFolders || [];
     state.hiddenItems   = saved.hiddenItems   || [];
@@ -425,15 +446,42 @@ async function handleAddFolder() {
     const result = await api.scanFolders(newFolders, state.settings.excludedFolders, scanSettings);
     const existingMoviePaths = new Set(state.library.map(f => f.path));
     const existingTVPaths    = new Set(state.tvShows.map(s => s.path));
+    const normTitle = t => (t||'').toLowerCase().replace(/[^a-z0-9]/g,'').trim();
+
     const freshMovies = (result.movies || []).filter(f =>
       !existingMoviePaths.has(f.path) &&
       !state.hiddenItems.includes(f.id) &&
       !state.hiddenFolders.some(hf => f.path.startsWith(hf))
     );
-    const freshTV = (result.tvShows || []).filter(s =>
-      !existingTVPaths.has(s.path) &&
-      !state.hiddenFolders.some(hf => s.path.startsWith(hf))
-    );
+
+    const freshTV = [];
+    for (const s of (result.tvShows || [])) {
+      if (state.hiddenFolders.some(hf => (s.path||'').startsWith(hf))) continue;
+
+      const existing = state.tvShows.find(ex =>
+        ex.id === s.id ||
+        normTitle(ex.title) === normTitle(s.title) ||
+        (s.metadata?.tmdbId && ex.metadata?.tmdbId &&
+          String(ex.metadata.tmdbId) === String(s.metadata.tmdbId))
+      );
+
+      if (existing) {
+        const knownPaths = new Set((existing.episodes || []).map(e => (e.path||'').toLowerCase()));
+        const newEps = (s.episodes || []).filter(e => !knownPaths.has((e.path||'').toLowerCase()));
+        if (newEps.length) {
+          existing.episodes = [...(existing.episodes || []), ...newEps]
+            .sort((a, b) => (a.season * 10000 + a.episode) - (b.season * 10000 + b.episode));
+          existing.episodeCount = existing.episodes.length;
+          existing.seasonCount  = new Set(existing.episodes.map(e => e.season)).size;
+          existing.size         = existing.episodes.reduce((n, e) => n + (e.size || 0), 0);
+          existing.sizeHuman    = existing.size > 1073741824
+            ? (existing.size / 1073741824).toFixed(1) + ' GB'
+            : (existing.size / 1048576).toFixed(0) + ' MB';
+        }
+      } else if (!existingTVPaths.has((s.path||'').toLowerCase())) {
+        freshTV.push(s);
+      }
+    }
     state.library.push(...freshMovies);
     state.tvShows.push(...freshTV);
     applyFiltersAndSort(); updateStats(); saveLibrary();
@@ -501,7 +549,7 @@ async function processFetchQueue() {
     arr[idx].status = 'loading';
     updateCardStatus(item.id, 'loading');
     try {
-      const meta = await api.fetchMetadata(item, state.settings.tmdbKey, state.settings.omdbKey);
+      const meta = await api.fetchMetadata(item);
       arr[idx].metadata   = meta;
       arr[idx].posterPath = meta.posterPath || null;
       arr[idx].status     = 'done';
@@ -535,7 +583,7 @@ async function fetchMetadataForItem(item) {
   arr[idx].status = 'loading';
   document.getElementById('detail-loading').style.display = 'flex';
   try {
-    const meta = await api.fetchMetadata(item, state.settings.tmdbKey, state.settings.omdbKey);
+    const meta = await api.fetchMetadata(item);
     arr[idx].metadata   = meta;
     arr[idx].posterPath = meta.posterPath || null;
     arr[idx].status     = 'done';
@@ -761,7 +809,7 @@ function buildGridCard(item, idx) {
   // Image or placeholder
   if (item.posterPath) {
     const img = document.createElement('img');
-    img.src = `file://${item.posterPath}`;
+    img.src = toMediaUrl(item.posterPath);
     img.alt = item.title || '';
     img.loading = 'lazy';
     img.style.cssText = `width:100%; height:100%; object-fit:cover; object-position:center top; display:block; transition:transform 0.4s ease;`;
@@ -885,12 +933,12 @@ function buildListCard(item) {
   const date = new Date(item.createdAt).toLocaleDateString('en-GB', {year:'numeric',month:'short',day:'numeric'});
 
   card.innerHTML = `
-    <div class="list-thumb">${item.posterPath ? `<img src="file://${item.posterPath}" loading="lazy" onerror="this.style.display='none'">` : `<div class="list-thumb-placeholder">${pSvg()}</div>`}</div>
+    <div class="list-thumb">${item.posterPath ? `<img src="${esc(toMediaUrl(item.posterPath))}" loading="lazy" onerror="this.style.display='none'">` : `<div class="list-thumb-placeholder">${pSvg()}</div>`}</div>
     <div class="list-info">
       <div class="list-title">${esc(item.displayTitle||item.title)}</div>
       <div class="list-sub">
         <span>${esc(ep)}</span>
-        ${m.genres?.length ? `<span>·</span><span>${m.genres.slice(0,2).join(', ')}</span>` : ''}
+        ${m.genres?.length ? `<span>·</span><span>${m.genres.slice(0,2).map(esc).join(', ')}</span>` : ''}
         ${m.director ? `<span>·</span><span>${esc(m.director.split(',')[0])}</span>` : ''}
       </div>
     </div>
@@ -950,7 +998,7 @@ function renderDetailPanel(item) {
   const posterEl = document.getElementById('detail-poster');
   const placeholderEl = document.getElementById('detail-poster-placeholder');
   if (item.posterPath) {
-    posterEl.src = `file://${item.posterPath}`;
+    posterEl.src = toMediaUrl(item.posterPath);
     posterEl.onload  = () => { posterEl.classList.add('loaded'); placeholderEl.style.display = 'none'; };
     posterEl.onerror = () => { posterEl.classList.remove('loaded'); placeholderEl.style.display = 'flex'; };
   } else {
@@ -1022,7 +1070,7 @@ function renderDetailPanel(item) {
   if (m.tmdbId && state.settings.tmdbKey) {
     const country = state.settings.countryCode ||
       Intl.DateTimeFormat().resolvedOptions().locale.split('-')[1] || 'US';
-    api.getWatchProviders(m.tmdbId, item.type === 'tv' ? 'tv' : 'movie', state.settings.tmdbKey, country)
+    api.getWatchProviders(m.tmdbId, item.type === 'tv' ? 'tv' : 'movie', country)
       .then(providers => {
         const el = document.getElementById('detail-streaming-banner');
         if (el && providers) el.innerHTML = buildStreamingBanner(providers);
@@ -1099,7 +1147,7 @@ function renderDetailPanel(item) {
       row.className = 'cast-row';
       row.dataset.person = person.name;
       const imgSrc = headshots && headshots[person.name]
-        ? 'file://' + headshots[person.name]
+        ? toMediaUrl(headshots[person.name])
         : '';
       const avatarHtml = imgSrc
         ? `<img class="cast-avatar" src="${imgSrc}" alt="${esc(person.name)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
@@ -1144,14 +1192,14 @@ function renderDetailPanel(item) {
             const img = row.querySelector('.cast-avatar');
             const placeholder = row.querySelector('.cast-avatar-placeholder');
             if (img) {
-              img.src = 'file://' + headshots[name];
+              img.src = toMediaUrl(headshots[name]);
               img.style.display = '';
               if (placeholder) placeholder.style.display = 'none';
             } else {
               // Create img element
               const newImg = document.createElement('img');
               newImg.className = 'cast-avatar';
-              newImg.src = 'file://' + headshots[name];
+              newImg.src = toMediaUrl(headshots[name]);
               newImg.alt = name;
               newImg.loading = 'lazy';
               if (placeholder) placeholder.style.display = 'none';
@@ -1201,25 +1249,33 @@ function renderDetailPanel(item) {
 }
 
 // ─── Settings ─────────────────────────────────────────────
-function initSettings() {
+function initSettings(tmdbKey, omdbKey) {
   const tmdbIn = document.getElementById('tmdb-key');
   const omdbIn = document.getElementById('omdb-key');
-  if (state.settings.tmdbKey) tmdbIn.value = state.settings.tmdbKey;
-  if (state.settings.omdbKey) omdbIn.value = state.settings.omdbKey;
+  // Keys already loaded in init() — populate inputs and dataset immediately,
+  // no async gap during which a Save click could wipe the other key.
+  if (tmdbKey) tmdbIn.value = tmdbKey;
+  if (omdbKey) omdbIn.value = omdbKey;
+  tmdbIn.dataset.saved = tmdbKey || '';
+  omdbIn.dataset.saved = omdbKey || '';
   document.getElementById('auto-fetch').checked  = state.settings.autoFetch;
   document.getElementById('dl-posters').checked  = state.settings.dlPosters;
 
-  document.getElementById('save-tmdb').addEventListener('click', () => {
+  document.getElementById('save-tmdb').addEventListener('click', async () => {
     const nk = tmdbIn.value.trim();
-    const isNew = nk && nk !== state.settings.tmdbKey;
-    state.settings.tmdbKey = nk; saveSettings();
+    const isNew = nk && nk !== tmdbIn.dataset.saved;
+    await api.saveApiKeys({ tmdbKey: nk, omdbKey: omdbIn.dataset.saved || '' });
+    tmdbIn.dataset.saved = nk;
+    state.settings.tmdbKey = nk;
     showToast('TMDB key saved', 'success');
     if (isNew) triggerFullMetadataRefresh();
   });
-  document.getElementById('save-omdb').addEventListener('click', () => {
+  document.getElementById('save-omdb').addEventListener('click', async () => {
     const nk = omdbIn.value.trim();
-    const isNew = nk && nk !== state.settings.omdbKey;
-    state.settings.omdbKey = nk; saveSettings();
+    const isNew = nk && nk !== omdbIn.dataset.saved;
+    await api.saveApiKeys({ tmdbKey: tmdbIn.dataset.saved || '', omdbKey: nk });
+    omdbIn.dataset.saved = nk;
+    state.settings.omdbKey = nk;
     showToast('OMDB key saved', 'success');
     if (isNew) triggerFullMetadataRefresh();
   });
@@ -1547,13 +1603,19 @@ function saveLibrary() {
   });
 }
 function saveSettings() {
-  localStorage.setItem('mv_s3', JSON.stringify(state.settings)); // keep for backwards compat
-  saveLibrary(); // also persist to library.json for reliable cross-restart storage
+  saveLibrary(); // persist to library.json (keys are excluded server-side)
 }
 function loadSettings() {
   try {
     const s = localStorage.getItem('mv_s3') || localStorage.getItem('mv_settings_v2') || localStorage.getItem('mv_settings');
-    if (s) Object.assign(state.settings, JSON.parse(s));
+    if (s) {
+      const parsed = JSON.parse(s);
+      // Never restore API keys from localStorage — they are loaded
+      // from encrypted storage separately in init().
+      delete parsed.tmdbKey;
+      delete parsed.omdbKey;
+      Object.assign(state.settings, parsed);
+    }
   } catch {}
 }
 function updateStats() {
@@ -1593,6 +1655,18 @@ function showToast(msg, type = 'info') {
   }, 3500);
 }
 
+// Convert an absolute local cache path to a media:// URL served by the
+// custom protocol in main.js. This replaces all file:// usages so that
+// webSecurity:true can remain enabled.
+function toMediaUrl(absPath) {
+  if (!absPath) return null;
+  // Strip everything up to and including the 'cache' directory segment,
+  // then use the remainder as the relative path within media://local/
+  const norm = absPath.replace(/\\/g, '/');
+  const idx  = norm.lastIndexOf('/cache/');
+  return idx !== -1 ? 'media://local/' + norm.slice(idx + 7) : 'media://local/' + norm;
+}
+
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
 }
@@ -1618,7 +1692,7 @@ async function openActorProfile(nameOrId) {
   resetActorView();
 
   try {
-    const person = await api.searchPerson(nameOrId, state.settings.tmdbKey);
+    const person = await api.searchPerson(nameOrId);
     if (person.error) {
       setActorLoading(false);
       showToast(`Person not found: ${person.error}`, 'error');
@@ -1672,7 +1746,7 @@ function renderActorHero(person) {
   const photoEl = document.getElementById('actor-photo');
   const placeholderEl = document.getElementById('actor-photo-placeholder');
   if (person.profileLocalPath) {
-    photoEl.src = `file://${person.profileLocalPath}`;
+    photoEl.src = toMediaUrl(person.profileLocalPath);
     photoEl.onload = () => { photoEl.classList.add('loaded'); placeholderEl.style.display = 'none'; };
     photoEl.onerror = () => { placeholderEl.style.display = 'flex'; };
   }
@@ -1807,7 +1881,7 @@ async function renderActorFilmography(person) {
       await Promise.all(batch.map(async film => {
         try {
           const providers = await api.getWatchProviders(
-            film.tmdbId, film.mediaType, state.settings.tmdbKey, country);
+            film.tmdbId, film.mediaType, country);
           // Only include films available on subscribed services
           const myServices = (providers.flatrate || []).filter(p => subs.includes(p.providerId));
           if (myServices.length) {
@@ -1940,7 +2014,7 @@ function buildFilmCard(film, postersMap, badgeType) {
   card.className = 'film-card';
 
   const localPath = postersMap && postersMap[film.tmdbId]
-    ? `file://${postersMap[film.tmdbId]}`
+    ? toMediaUrl(postersMap[film.tmdbId])
     : null;
   const providers = state.actorStreamingData[film.tmdbId];
   const isLocal   = isInLocalLibrary(film.tmdbId, film.title);
@@ -2030,8 +2104,8 @@ async function doRemapSearch() {
   try {
     // Search both movies and TV — allows fixing misclassified items (e.g. movie filed as TV)
     const [movieData, tvData] = await Promise.all([
-      api.remapSearch(query, 'movie', state.settings.tmdbKey),
-      api.remapSearch(query, 'tv',    state.settings.tmdbKey),
+      api.remapSearch(query, 'movie'),
+      api.remapSearch(query, 'tv'),
     ]);
     // Merge results, tag each with correct mediaType, sort by popularity
     const allResults = [
@@ -2092,13 +2166,7 @@ async function applyRemap(result) {
   });
 
   try {
-    const data = await api.remapApply(
-      state.activeItem,
-      result.tmdbId,
-      result.mediaType,
-      state.settings.tmdbKey,
-      state.settings.omdbKey
-    );
+    const data = await api.remapApply(state.activeItem, result.tmdbId, result.mediaType);
 
     if (data.error) {
       showToast(`Remap failed: ${data.error}`, 'error');
@@ -2478,7 +2546,7 @@ async function openTitleSearch(query) {
   document.getElementById('titlesearch-loading-msg').textContent = `Searching for "${query}"…`;
 
   try {
-    const data = await api.searchTitle(query, state.settings.tmdbKey, state.settings.omdbKey);
+    const data = await api.searchTitle(query);
     loading.style.display = 'none';
     wrap.style.display = 'flex';
     results.innerHTML = '';
@@ -2549,10 +2617,7 @@ async function openTitleDetailPage(tmdbId, mediaType, title, posterUrl, fromSear
   const country = state.settings.countryCode ||
     Intl.DateTimeFormat().resolvedOptions().locale.split('-')[1] || 'US';
 
-  const meta = await api.fetchTitleDetail(
-    tmdbId, mediaType,
-    state.settings.tmdbKey, state.settings.omdbKey,
-    country
+  const meta = await api.fetchTitleDetail(tmdbId, mediaType, country
   );
 
   loading.style.display = 'none';
@@ -2695,7 +2760,7 @@ function renderTitleCastSection(container, label, people, headshots) {
     const hs = headshots && headshots[person.name];
     const initials = person.name.split(' ').map(w=>w[0]||'').join('').substring(0,2).toUpperCase();
     const avatarHtml = hs
-      ? `<img style="width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0;" src="file://${hs}" loading="lazy">`
+      ? `<img style="width:38px;height:38px;border-radius:50%;object-fit:cover;flex-shrink:0;" src="${esc(toMediaUrl(hs))}" loading="lazy">`
       : `<div style="width:38px;height:38px;border-radius:50%;background:var(--bg-3);border:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--t2);">${initials}</div>`;
     row.innerHTML = `${avatarHtml}
       <div style="flex:1;min-width:0;">
@@ -2811,9 +2876,14 @@ function renderTVEpisodePanel(item, meta, container) {
     const cacheKey = `${meta.tmdbId}_${seasonNum}`;
     const tmdbEps  = tvEpisodeCache[cacheKey] || null;
 
+    // Find episode numbers that appear more than once (different files, same ep number)
+    const epNumCount = {};
+    eps.forEach(ep => { epNumCount[ep.episode] = (epNumCount[ep.episode] || 0) + 1; });
+
     eps.forEach(ep => {
       const tmdbEp = tmdbEps ? tmdbEps.find(t => t.episode_number === ep.episode) : null;
-      epList.appendChild(buildEpisodeCard(ep, tmdbEp, () => updateSeasonProgress(eps)));
+      const isDuplicate = epNumCount[ep.episode] > 1;
+      epList.appendChild(buildEpisodeCard(ep, tmdbEp, () => updateSeasonProgress(eps), isDuplicate));
     });
 
     // episode count shown in season selector label
@@ -2836,11 +2906,11 @@ function renderTVEpisodePanel(item, meta, container) {
 async function fetchTVSeasonData(tmdbId, seasonNum) {
   if (!state.settings.tmdbKey) return null;
   try {
-    const resp = await fetch(
-      `https://api.themoviedb.org/3/tv/${tmdbId}/season/${seasonNum}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
+    const resp = await api.tmdbGet(
+      `/3/tv/${tmdbId}/season/${seasonNum}`
     );
-    if (!resp.ok) return null;
-    return await resp.json();
+    if (!resp || resp.error) return null;
+    return resp;
   } catch { return null; }
 }
 
@@ -2868,7 +2938,7 @@ function applyEpisodeWatchedStyle(card, watched) {
   if (metaEl) metaEl.style.color = watched ? '#3B6D11' : 'var(--t2)';
 }
 
-function buildEpisodeCard(localEp, tmdbEp, onWatchedToggle) {
+function buildEpisodeCard(localEp, tmdbEp, onWatchedToggle, isDuplicate) {
   const isWatched = !!localEp.watched;
   const card = document.createElement('div');
   card.style.cssText = 'display:flex;gap:12px;padding:10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-2);cursor:pointer;transition:border-color 0.16s,background 0.16s;align-items:flex-start;position:relative;';
@@ -2927,12 +2997,18 @@ function buildEpisodeCard(localEp, tmdbEp, onWatchedToggle) {
   const runtime = tmdbEp && tmdbEp.runtime ? `${tmdbEp.runtime}m` : localEp.sizeHuman;
   const airDate = tmdbEp && tmdbEp.air_date ? new Date(tmdbEp.air_date).toLocaleDateString('en-GB',{year:'numeric',month:'short',day:'numeric'}) : '';
   const overview = tmdbEp && tmdbEp.overview ? tmdbEp.overview : '';
+  // When multiple local files share the same episode number, show the filename
+  // so the user can tell them apart (e.g. two different cuts of the same episode).
+  const filenameLabel = isDuplicate
+    ? `<div style="font-size:10px;color:var(--t2);font-family:'DM Mono',monospace;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(localEp.filename)}">${esc(localEp.filename.replace(/\.[^.]+$/, ''))}</div>`
+    : '';
 
   info.innerHTML = `
     <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px;">
       <span class="ep-num-text" style="font-size:11px;font-weight:700;color:${isWatched?'#3B6D11':'var(--t2)'};font-family:'DM Mono',monospace;flex-shrink:0;">E${String(localEp.episode).padStart(2,'0')}</span>
       <span class="ep-title-text" style="font-size:13px;font-weight:600;color:${isWatched?'#97C459':'var(--t0)'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(epTitle)}</span>
     </div>
+    ${filenameLabel}
     ${overview ? `<p style="font-size:11px;color:var(--t1);line-height:1.55;margin-bottom:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${esc(overview)}</p>` : ''}
     <div class="ep-meta-text" style="display:flex;align-items:center;gap:10px;font-size:10px;color:${isWatched?'#3B6D11':'var(--t2)'};font-family:'DM Mono',monospace;">
       ${airDate ? `<span>${airDate}</span>` : ''}
@@ -3043,7 +3119,7 @@ function renderCinematicOverlay(item, mode) {
 
   const backdropUrl = m.backdropPath
     ? `https://image.tmdb.org/t/p/original${m.backdropPath}`
-    : (item.posterPath ? `file://${item.posterPath}` : null);
+    : (item.posterPath ? toMediaUrl(item.posterPath) : null);
 
   inner.style.cssText = `min-height:100vh;position:relative;background:#0a0a0f;`;
   inner.innerHTML = '';
@@ -3218,7 +3294,7 @@ function cinCastSection(item, m) {
 function cinLazyStreamingProviders(item, m, insertAfter) {
   if (m.streamingProviders || !m.tmdbId || !state.settings.tmdbKey) return;
   const country = state.settings.countryCode || Intl.DateTimeFormat().resolvedOptions().locale.split('-')[1] || 'US';
-  api.getWatchProviders(m.tmdbId, item.type==='tv'?'tv':'movie', state.settings.tmdbKey, country).then(providers => {
+  api.getWatchProviders(m.tmdbId, item.type==='tv'?'tv':'movie', country).then(providers => {
     if (!providers.flatrate) return;
     const found = [...state.library,...state.tvShows].find(x=>x.id===item.id);
     if (found?.metadata) found.metadata.streamingProviders = providers;
@@ -3296,7 +3372,7 @@ function renderCinematicStyleA(inner, item, m, backdropUrl) {
   hero.style.cssText = 'display:flex;gap:32px;align-items:flex-start;margin-bottom:28px;';
   if (item.posterPath) {
     const p = document.createElement('img');
-    p.src=`file://${item.posterPath}`; p.style.cssText='width:160px;height:240px;border-radius:10px;object-fit:cover;flex-shrink:0;box-shadow:0 12px 40px rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.1);';
+    p.src=toMediaUrl(item.posterPath); p.style.cssText='width:160px;height:240px;border-radius:10px;object-fit:cover;flex-shrink:0;box-shadow:0 12px 40px rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.1);';
     hero.appendChild(p);
   }
   const heroInfo = document.createElement('div');
@@ -3394,7 +3470,7 @@ function renderCinematicStyleC(inner, item, m, backdropUrl) {
   const floatInfo = document.createElement('div');
   floatInfo.style.cssText='position:relative;z-index:2;padding:36px 44px 0;display:flex;gap:24px;align-items:flex-end;';
   if (item.posterPath) {
-    const p=document.createElement('img'); p.src=`file://${item.posterPath}`;
+    const p=document.createElement('img'); p.src=toMediaUrl(item.posterPath);
     p.style.cssText='width:130px;height:195px;border-radius:8px;object-fit:cover;flex-shrink:0;box-shadow:0 8px 32px rgba(0,0,0,.8);border:1px solid rgba(255,255,255,.1);';
     floatInfo.appendChild(p);
   }
@@ -3461,10 +3537,10 @@ async function openPersonSearch(query) {
   // Search TMDB person database
   let personResults;
   try {
-    const resp = await fetch(
-      `https://api.themoviedb.org/3/search/person?api_key=${encodeURIComponent(state.settings.tmdbKey)}&query=${encodeURIComponent(query)}&page=1`
+    const resp = await api.tmdbGet(
+      `/3/search/person?query=${encodeURIComponent(query)}&page=1`
     );
-    const data = await resp.json();
+    const data = resp;
     personResults = (data.results || []).slice(0, 6);
   } catch {
     // Network error — fall back to title search
@@ -3616,13 +3692,41 @@ async function handleRescan(silent = false) {
       !existingMoviePaths.has((f.path||'').toLowerCase()) &&
       !state.hiddenFolders.some(hf => (f.path||'').startsWith(hf))
     );
-    const newTV = (result.tvShows || []).filter(s =>
-      !existingTVIds.has(s.id) &&
-      !existingTVTitles.has(normTitle(s.title)) &&
-      !(s.metadata?.tmdbId && existingTVTmdbIds.has(String(s.metadata.tmdbId))) &&
-      !existingTVPaths.has((s.path||'').toLowerCase()) &&
-      !state.hiddenFolders.some(hf => (s.path||'').startsWith(hf))
-    );
+    const newTV = [];
+    for (const s of (result.tvShows || [])) {
+      if (state.hiddenFolders.some(hf => (s.path||'').startsWith(hf))) continue;
+
+      // Find an existing show that matches by id, normalised title, or tmdbId
+      const existing = state.tvShows.find(ex =>
+        ex.id === s.id ||
+        normTitle(ex.title) === normTitle(s.title) ||
+        (s.metadata?.tmdbId && ex.metadata?.tmdbId &&
+          String(ex.metadata.tmdbId) === String(s.metadata.tmdbId))
+      );
+
+      if (existing) {
+        // Merge any episodes whose path isn't already tracked.
+        // Case-insensitive comparison — Windows paths are case-insensitive.
+        const knownPaths = new Set((existing.episodes || []).map(e => (e.path||'').toLowerCase()));
+        const newEps = (s.episodes || []).filter(e => !knownPaths.has((e.path||'').toLowerCase()));
+        if (newEps.length) {
+          existing.episodes = [...(existing.episodes || []), ...newEps]
+            .sort((a, b) => (a.season * 10000 + a.episode) - (b.season * 10000 + b.episode));
+          existing.episodeCount = existing.episodes.length;
+          existing.seasonCount  = new Set(existing.episodes.map(e => e.season)).size;
+          existing.size         = existing.episodes.reduce((n, e) => n + (e.size || 0), 0);
+          existing.sizeHuman    = existing.size > 1073741824
+            ? (existing.size / 1073741824).toFixed(1) + ' GB'
+            : (existing.size / 1048576).toFixed(0) + ' MB';
+        }
+      } else if (
+        !existingTVIds.has(s.id) &&
+        !existingTVPaths.has((s.path||'').toLowerCase())
+      ) {
+        // Genuinely new show
+        newTV.push(s);
+      }
+    }
 
     if (newMovies.length || newTV.length) {
       state.library.push(...newMovies);
@@ -3907,7 +4011,7 @@ async function checkWatchlistStreaming(showToastMsg = false) {
   let updated = 0;
   for (const item of state.watchlist) {
     try {
-      const providers = await api.getWatchProviders(item.tmdbId, item.mediaType, state.settings.tmdbKey, country);
+      const providers = await api.getWatchProviders(item.tmdbId, item.mediaType, country);
       if (providers.flatrate) {
         item.streamingProviders = providers;
         updated++;
@@ -3993,10 +4097,10 @@ async function wlTriggerDropdown(query) {
   try {
     if (_wlSearchMode === 'people') {
       // Person search dropdown
-      const resp = await fetch(
-        `https://api.themoviedb.org/3/search/person?api_key=${encodeURIComponent(state.settings.tmdbKey)}&query=${encodeURIComponent(query)}&page=1`
-      );
-      const data = await resp.json();
+      const resp = await api.tmdbGet(
+      `/3/search/person?query=${encodeURIComponent(query)}&page=1`
+    );
+      const data = resp;
       const people = (data.results || []).filter(p => (p.known_for||[]).length > 0 || (p.popularity||0) >= 1).slice(0, 6);
 
       if (!people.length) {
@@ -4026,8 +4130,8 @@ async function wlTriggerDropdown(query) {
     } else {
       // Title search dropdown
       const [mRes, tRes] = await Promise.all([
-        fetch(`https://api.themoviedb.org/3/search/movie?api_key=${encodeURIComponent(state.settings.tmdbKey)}&query=${encodeURIComponent(query)}&page=1`).then(r=>r.json()),
-        fetch(`https://api.themoviedb.org/3/search/tv?api_key=${encodeURIComponent(state.settings.tmdbKey)}&query=${encodeURIComponent(query)}&page=1`).then(r=>r.json()),
+        api.tmdbGet(`/3/search/movie?query=${encodeURIComponent(query)}&page=1`),
+        api.tmdbGet(`/3/search/tv?query=${encodeURIComponent(query)}&page=1`),
       ]);
       const results = [
         ...(mRes.results||[]).slice(0,4).map(r=>({...r,media_type:'movie'})),
@@ -4102,8 +4206,8 @@ async function wlShowFullResults(query) {
   try {
     if (_wlSearchMode === 'people') {
       // People full results — open actor profile in actor view
-      const resp = await fetch(`https://api.themoviedb.org/3/search/person?api_key=${encodeURIComponent(state.settings.tmdbKey)}&query=${encodeURIComponent(query)}&page=1`);
-      const data = await resp.json();
+      const resp = await api.tmdbGet(`/3/search/person?query=${encodeURIComponent(query)}&page=1`);
+      const data = resp;
       const people = (data.results || []).slice(0, 8);
       if (!people.length) {
         fullRes.innerHTML = buildWlBackBtn() + `<div class="watchlist-empty"><h2>No people found for "${esc(query)}"</h2><p>Try switching to Titles search</p></div>`;
@@ -4142,8 +4246,8 @@ async function wlShowFullResults(query) {
     } else {
       // Title full results
       const [mRes, tRes] = await Promise.all([
-        fetch(`https://api.themoviedb.org/3/search/movie?api_key=${encodeURIComponent(state.settings.tmdbKey)}&query=${encodeURIComponent(query)}&page=1`).then(r=>r.json()),
-        fetch(`https://api.themoviedb.org/3/search/tv?api_key=${encodeURIComponent(state.settings.tmdbKey)}&query=${encodeURIComponent(query)}&page=1`).then(r=>r.json()),
+        api.tmdbGet(`/3/search/movie?query=${encodeURIComponent(query)}&page=1`),
+        api.tmdbGet(`/3/search/tv?query=${encodeURIComponent(query)}&page=1`),
       ]);
       const results = [
         ...(mRes.results||[]).slice(0,6).map(r=>({...r,media_type:'movie'})),
@@ -4283,8 +4387,8 @@ async function toggleWatchlistEpisodes(item, panelWrap) {
   let showDetails = null;
   try {
     if (!item.showDetails && state.settings.tmdbKey) {
-      const resp = await fetch(`https://api.themoviedb.org/3/tv/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`);
-      showDetails = await resp.json();
+      const resp = await api.tmdbGet(`/3/tv/${item.tmdbId}`);
+      showDetails = resp;
       item.showDetails = { seasons: showDetails.number_of_seasons, episodes: showDetails.number_of_episodes };
       item.totalEpisodes = showDetails.number_of_episodes;
       saveLibrary();
@@ -4302,8 +4406,8 @@ async function renderWatchlistEpisodePanel(item, panelWrap, totalSeasons, select
   const cacheKey = `${item.tmdbId}_${selectedSeason}`;
   if (!wlEpCache[cacheKey] && state.settings.tmdbKey) {
     try {
-      const resp = await fetch(`https://api.themoviedb.org/3/tv/${item.tmdbId}/season/${selectedSeason}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`);
-      const data = await resp.json();
+      const resp = await api.tmdbGet(`/3/tv/${item.tmdbId}/season/${selectedSeason}`);
+      const data = resp;
       // Only cache if episodes actually exist — don't cache empty future seasons
       if (data.episodes && data.episodes.length > 0) wlEpCache[cacheKey] = data.episodes;
     } catch {}
@@ -4573,11 +4677,10 @@ async function openWatchlistTVOverlay(wlItem) {
   // Fetch full show metadata from TMDB
   let meta = {};
   try {
-    const [detailResp, credResp] = await Promise.all([
-      fetch(`https://api.themoviedb.org/3/tv/${wlItem.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}&append_to_response=credits,content_ratings`),
-      fetch(`https://api.themoviedb.org/3/tv/${wlItem.tmdbId}/credits?api_key=${encodeURIComponent(state.settings.tmdbKey)}`),
+    const [detail, credResp] = await Promise.all([
+      api.tmdbGet(`/3/tv/${wlItem.tmdbId}?append_to_response=credits,content_ratings`),
+      api.tmdbGet(`/3/tv/${wlItem.tmdbId}/credits`),
     ]);
-    const detail = await detailResp.json();
     meta = {
       tmdbId:      String(wlItem.tmdbId),
       title:       detail.name || wlItem.title,
@@ -4846,8 +4949,8 @@ function renderWLEpisodePanel(wlItem, container, totalSeasons, startSeason) {
 
       if (state.settings.tmdbKey) {
         try {
-          const resp = await fetch(`https://api.themoviedb.org/3/tv/${wlItem.tmdbId}/season/${seasonNum}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`);
-          const data = await resp.json();
+          const resp = await api.tmdbGet(`/3/tv/${wlItem.tmdbId}/season/${seasonNum}`);
+          const data = resp;
           if (data.episodes && data.episodes.length > 0) {
             wlEpCache[cacheKey] = data.episodes;
           }
@@ -5009,11 +5112,11 @@ async function checkWatchlistNewSeasons(notify = false) {
 
       if (item.mediaType === 'tv') {
         // ── TV: check for new/upcoming season ──────────────
-        const resp = await fetch(
-          `https://api.themoviedb.org/3/tv/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
-        );
-        if (!resp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
-        const data = await resp.json();
+        const resp = await api.tmdbGet(
+      `/3/tv/${item.tmdbId}`
+    );
+        if (!resp || resp.error) { await new Promise(r => setTimeout(r, 150)); continue; }
+        const data = resp;
         const seasons = (data.seasons || []).filter(s => s.season_number > 0);
         if (!seasons.length) { await new Promise(r => setTimeout(r, 150)); continue; }
         const latest = seasons[seasons.length - 1];
@@ -5031,13 +5134,11 @@ async function checkWatchlistNewSeasons(notify = false) {
       } else {
         // ── Movie: check theatrical + streaming/digital release dates ──
         const country = (state.settings.countryCode || 'US').toUpperCase();
-        const [baseResp, datesResp] = await Promise.all([
-          fetch(`https://api.themoviedb.org/3/movie/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`),
-          fetch(`https://api.themoviedb.org/3/movie/${item.tmdbId}/release_dates?api_key=${encodeURIComponent(state.settings.tmdbKey)}`),
+        const [baseData, datesData] = await Promise.all([
+          api.tmdbGet(`/3/movie/${item.tmdbId}`),
+          api.tmdbGet(`/3/movie/${item.tmdbId}/release_dates`),
         ]);
-        if (!baseResp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
-        const baseData  = await baseResp.json();
-        const datesData = datesResp.ok ? await datesResp.json() : null;
+        if (!baseData || baseData.error) { await new Promise(r => setTimeout(r, 150)); continue; }
 
         // Collect theatrical + digital (4) + streaming/TV (6) dates
         const candidates = [];
@@ -5342,23 +5443,22 @@ async function refreshTVGuide(notify = false) {
   const tvWatchlist = state.watchlist.filter(w => w.mediaType === 'tv' && w.tmdbId);
   for (const item of tvWatchlist) {
     try {
-      const resp = await fetch(
-        `https://api.themoviedb.org/3/tv/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
-      );
-      if (!resp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
-      const data = await resp.json();
+      const resp = await api.tmdbGet(
+      `/3/tv/${item.tmdbId}`
+    );
+      if (!resp || resp.error) { await new Promise(r => setTimeout(r, 150)); continue; }
+      const data = resp;
       const seasons = (data.seasons || []).filter(s => s.season_number > 0);
 
       for (const season of seasons.slice(-2)) { // check last 2 seasons
         const key = `${item.tmdbId}_${season.season_number}`;
         let episodes = tvEpisodeCache[key];
         if (!episodes) {
-          const sr = await fetch(
-            `https://api.themoviedb.org/3/tv/${item.tmdbId}/season/${season.season_number}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
-          );
-          if (sr.ok) {
-            const sd = await sr.json();
-            episodes = sd.episodes || [];
+          const sr = await api.tmdbGet(
+      `/3/tv/${item.tmdbId}/season/${season.season_number}`
+    );
+          if (sr && !sr.error) {
+            episodes = sr.episodes || [];
             if (episodes.length) tvEpisodeCache[key] = episodes;
           }
           await new Promise(r => setTimeout(r, 120));
@@ -5393,11 +5493,11 @@ async function refreshTVGuide(notify = false) {
   for (const show of activeLocal) {
     if (tvWatchlist.find(w => String(w.tmdbId) === String(show.metadata.tmdbId))) continue; // already handled
     try {
-      const resp = await fetch(
-        `https://api.themoviedb.org/3/tv/${show.metadata.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
-      );
-      if (!resp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
-      const data = await resp.json();
+      const resp = await api.tmdbGet(
+      `/3/tv/${show.metadata.tmdbId}`
+    );
+      if (!resp || resp.error) { await new Promise(r => setTimeout(r, 150)); continue; }
+      const data = resp;
       const seasons = (data.seasons || []).filter(s => s.season_number > 0);
       const latestSeason = seasons[seasons.length - 1];
       if (!latestSeason) continue;
@@ -5405,12 +5505,11 @@ async function refreshTVGuide(notify = false) {
       const key = `${show.metadata.tmdbId}_${latestSeason.season_number}`;
       let episodes = tvEpisodeCache[key];
       if (!episodes) {
-        const sr = await fetch(
-          `https://api.themoviedb.org/3/tv/${show.metadata.tmdbId}/season/${latestSeason.season_number}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
-        );
-        if (sr.ok) {
-          const sd = await sr.json();
-          episodes = sd.episodes || [];
+        const sr = await api.tmdbGet(
+      `/3/tv/${show.metadata.tmdbId}/season/${latestSeason.season_number}`
+    );
+        if (sr && !sr.error) {
+          episodes = sr.episodes || [];
           if (episodes.length) tvEpisodeCache[key] = episodes;
         }
         await new Promise(r => setTimeout(r, 120));
@@ -5439,11 +5538,11 @@ async function refreshTVGuide(notify = false) {
   const movieWatchlist = state.watchlist.filter(w => w.mediaType === 'movie' && w.tmdbId);
   for (const item of movieWatchlist) {
     try {
-      const resp = await fetch(
-        `https://api.themoviedb.org/3/movie/${item.tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
-      );
-      if (!resp.ok) { await new Promise(r => setTimeout(r, 150)); continue; }
-      const data = await resp.json();
+      const resp = await api.tmdbGet(
+      `/3/movie/${item.tmdbId}`
+    );
+      if (!resp || resp.error) { await new Promise(r => setTimeout(r, 150)); continue; }
+      const data = resp;
       if (!data.release_date) continue;
       const airDate = new Date(data.release_date);
       if (airDate < past30 || airDate > future90) continue;
@@ -5505,23 +5604,22 @@ async function refreshTVGuideForItem(tmdbId, mediaType) {
 
   try {
     if (mediaType === 'tv') {
-      const resp = await fetch(
-        `https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
-      );
-      if (!resp.ok) return;
-      const data = await resp.json();
+      const resp = await api.tmdbGet(
+      `/3/tv/${tmdbId}`
+    );
+      if (!resp || resp.error) return;
+      const data = resp;
       const seasons = (data.seasons || []).filter(s => s.season_number > 0);
 
       for (const season of seasons.slice(-2)) {
         const key = `${tmdbId}_${season.season_number}`;
         let episodes = tvEpisodeCache[key];
         if (!episodes) {
-          const sr = await fetch(
-            `https://api.themoviedb.org/3/tv/${tmdbId}/season/${season.season_number}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`
-          );
-          if (sr.ok) {
-            const sd = await sr.json();
-            episodes = sd.episodes || [];
+          const sr = await api.tmdbGet(
+      `/3/tv/${tmdbId}/season/${season.season_number}`
+    );
+          if (sr && !sr.error) {
+            episodes = sr.episodes || [];
             if (episodes.length) tvEpisodeCache[key] = episodes;
           }
         }
@@ -5543,13 +5641,11 @@ async function refreshTVGuideForItem(tmdbId, mediaType) {
       }
     } else {
       const country = (state.settings.countryCode || 'US').toUpperCase();
-      const [baseResp, datesResp] = await Promise.all([
-        fetch(`https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${encodeURIComponent(state.settings.tmdbKey)}`),
-        fetch(`https://api.themoviedb.org/3/movie/${tmdbId}/release_dates?api_key=${encodeURIComponent(state.settings.tmdbKey)}`),
+      const [baseData, datesData] = await Promise.all([
+        api.tmdbGet(`/3/movie/${tmdbId}`),
+        api.tmdbGet(`/3/movie/${tmdbId}/release_dates`),
       ]);
-      if (!baseResp.ok) return;
-      const baseData  = await baseResp.json();
-      const datesData = datesResp.ok ? await datesResp.json() : null;
+      if (!baseData || baseData.error) return;
 
       const candidates = [];
       if (baseData.release_date) candidates.push(new Date(baseData.release_date));
@@ -5669,12 +5765,12 @@ async function checkForUpdates(userInitiated = false) {
       headers: { 'Accept': 'application/vnd.github.v3+json' }
     });
 
-    if (!resp.ok) {
+    if (!resp || resp.error) {
       if (userInitiated) showToast('Could not reach GitHub — check your connection', 'error');
       return;
     }
 
-    const data = await resp.json();
+    const data = resp;
     const latest = (data.tag_name || '').replace(/^v/, '');
 
     if (!latest) {
@@ -5691,7 +5787,9 @@ async function checkForUpdates(userInitiated = false) {
     if (isNewer) {
       // Find the .exe asset if available
       const exeAsset = (data.assets || []).find(a => a.name.endsWith('.exe'));
-      const downloadUrl = exeAsset ? exeAsset.browser_download_url : RELEASES_PAGE;
+      const rawUrl = exeAsset ? exeAsset.browser_download_url : RELEASES_PAGE;
+      // Only allow github.com URLs — guard against a compromised API response
+      const downloadUrl = /^https:\/\/github\.com\//i.test(rawUrl) ? rawUrl : RELEASES_PAGE;
 
       // Show a persistent update banner
       showUpdateBanner(`v${latest}`, downloadUrl, data.body || '');
@@ -5736,16 +5834,16 @@ function showUpdateBanner(version, downloadUrl, releaseNotes) {
     <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">
       <div>
         <div style="font-size:13px;font-weight:700;color:var(--t0);margin-bottom:3px;">
-          MediaVault ${version} available
+          MediaVault ${esc(version)} available
         </div>
         ${notes ? `<div style="font-size:11px;color:var(--t2);line-height:1.5;">${esc(notes.substring(0, 120))}${notes.length > 120 ? '…' : ''}</div>` : ''}
       </div>
       <button id="update-banner-close" style="background:none;border:none;color:var(--t2);cursor:pointer;font-size:16px;line-height:1;flex-shrink:0;padding:0;">×</button>
     </div>
     <div style="display:flex;gap:8px;">
-      <a href="${downloadUrl}" id="update-download-btn" style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 14px;background:var(--accent);color:#fff;border-radius:var(--radius-sm);font-size:12px;font-weight:600;text-decoration:none;transition:opacity .15s;">
+      <a href="${esc(downloadUrl)}" id="update-download-btn" style="flex:1;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 14px;background:var(--accent);color:#fff;border-radius:var(--radius-sm);font-size:12px;font-weight:600;text-decoration:none;transition:opacity .15s;">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        Download ${version}
+        Download ${esc(version)}
       </a>
       <a href="https://github.com/IVibeStuff/MediaVault/releases" style="display:inline-flex;align-items:center;padding:8px 12px;background:var(--bg-3);color:var(--t1);border:1px solid var(--border-mid);border-radius:var(--radius-sm);font-size:12px;font-weight:500;text-decoration:none;">
         Release notes
