@@ -48,7 +48,7 @@ dist/
 
 ### Step 4 — Install
 
-Run `MediaVault-Setup-1.6.6.exe`. The installer lets you choose the install
+Run `MediaVault-Setup-1.7.0.exe`. The installer lets you choose the install
 directory, creates a Desktop shortcut and a Start Menu entry under MediaVault.
 
 ---
