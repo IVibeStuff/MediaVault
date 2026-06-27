@@ -30,4 +30,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   searchTitle:      (query)                             => ipcRenderer.invoke('search-title', query),
   fetchTitleDetail: (id, type, country)                 => ipcRenderer.invoke('fetch-title-detail', id, type, country),
   tmdbGet:          (pathAndQuery)                       => ipcRenderer.invoke('tmdb-get', pathAndQuery),
+  githubGet:        (repoPath)                            => ipcRenderer.invoke('github-get', repoPath),
 });

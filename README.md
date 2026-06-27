@@ -46,6 +46,11 @@ dist/
   MediaVault-Setup-1.7.0.exe
 ```
 
+**Important:** the version shown in-app (Settings → bottom of toolbar) is read
+live from `package.json` via Electron's `app.getVersion()`. Bumping the
+`version` field here and rebuilding (`npm run build`) is all that's needed —
+there is no separate version string to update anywhere else.
+
 ### Step 4 — Install
 
 Run `MediaVault-Setup-1.7.0.exe`. The installer lets you choose the install

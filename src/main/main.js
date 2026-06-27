@@ -1040,3 +1040,14 @@ ipcMain.handle('tmdb-get', async (event, pathAndQuery) => {
     return await httpsGet(url);
   } catch (err) { return { error: err.message }; }
 });
+
+// ─── GitHub releases check (for in-app update checker) ────
+// Restricted to the fixed MediaVault repo path — not a general proxy.
+ipcMain.handle('github-get', async (event, repoPath) => {
+  if (typeof repoPath !== 'string' || !/^\/repos\/[\w-]+\/[\w-]+\/releases\/latest$/.test(repoPath)) {
+    return { error: 'Invalid path' };
+  }
+  try {
+    return await httpsGet(`https://api.github.com${repoPath}`);
+  } catch (err) { return { error: err.message }; }
+});

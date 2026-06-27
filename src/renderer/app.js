@@ -131,6 +131,10 @@ async function init() {
   });
   document.getElementById('tvguide-refresh-btn')?.addEventListener('click', () => refreshTVGuide(true));
   document.getElementById('check-updates-btn')?.addEventListener('click', () => checkForUpdates(true));
+  api.getAppVersion().then(v => {
+    const el = document.getElementById('settings-app-version');
+    if (el) el.textContent = `v${v}`;
+  }).catch(() => {});
   document.getElementById('tvguide-clear-btn')?.addEventListener('click', () => {
     if (confirm('Clear all TV Guide notifications?')) {
       state.tvGuideNotifications = [];
@@ -5756,21 +5760,17 @@ function markTVGuideEntrySeen(item) {
 // ═══════════════════════════════════════════════════════
 
 async function checkForUpdates(userInitiated = false) {
-  const CURRENT_VERSION = await api.getAppVersion().catch(() => '1.6.3');
-  const RELEASES_API    = 'https://api.github.com/repos/IVibeStuff/MediaVault/releases/latest';
+  const CURRENT_VERSION = await api.getAppVersion().catch(() => '0.0.0');
   const RELEASES_PAGE   = 'https://github.com/IVibeStuff/MediaVault/releases/latest';
 
   try {
-    const resp = await fetch(RELEASES_API, {
-      headers: { 'Accept': 'application/vnd.github.v3+json' }
-    });
+    const data = await api.githubGet('/repos/IVibeStuff/MediaVault/releases/latest');
 
-    if (!resp || resp.error) {
+    if (!data || data.error) {
       if (userInitiated) showToast('Could not reach GitHub — check your connection', 'error');
       return;
     }
 
-    const data = resp;
     const latest = (data.tag_name || '').replace(/^v/, '');
 
     if (!latest) {
