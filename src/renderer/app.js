@@ -336,18 +336,27 @@ async function loadLibraryData() {
   }
 
   // Re-evaluate existing library entries against junk filter
-  // Catches files added before junk detection was improved
+  // Catches files added before junk detection was improved.
+  // Token-based matching (mirrors main.js isJunkFile) — the old substring
+  // matching permanently deleted legitimate titles like "Extraction"
+  // ('extra') or "The Big Short" ('short') from the library on every load.
   if (state.library.length > 0) {
     const DEFAULT_JUNK_KW = ['sample','trailer','teaser','featurette','behind.the.scenes',
       'deleted.scene','interview','making.of','extra','bonus','short','readme','nfo'];
-    const junkKw = [...DEFAULT_JUNK_KW, ...(state.settings.junkKeywords || [])];
+    const normTok = s => String(s).toLowerCase().replace(/[._\-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const junkKw = [...new Set([...DEFAULT_JUNK_KW, ...(state.settings.junkKeywords || [])]
+      .map(normTok).filter(Boolean))];
     const minSizeMb = state.settings.minFileSizeMb != null ? state.settings.minFileSizeMb : 50;
+    const minBytes = (minSizeMb > 0 ? minSizeMb : 50) * 1024 * 1024;
     const before = state.library.length;
     state.library = state.library.filter(item => {
-      const fname = (item.filename || item.path || '').toLowerCase();
-      const fpath = (item.path || '').toLowerCase().replace(/\\/g, '/');
-      const check = fname + '|' + fpath;
-      if (junkKw.some(k => check.includes(k.toLowerCase()))) return false;
+      const fname = (item.filename || item.path || '').replace(/\.[^/.]+$/, '');
+      const normName = ' ' + normTok(fname) + ' ';
+      const hasYear = /\b(19|20)\d{2}\b/.test(fname);
+      const realRelease = hasYear && (item.size || 0) >= minBytes;
+      if (!realRelease && junkKw.some(k => normName.includes(' ' + k + ' '))) return false;
+      const segs = (item.path || '').split(/[\\/]/).slice(0, -1).map(normTok);
+      if (segs.some(seg => junkKw.some(k => seg === k || seg === k + 's'))) return false;
       if (minSizeMb > 0 && item.size && item.size < minSizeMb * 1024 * 1024) return false;
       return true;
     });
@@ -449,7 +458,9 @@ async function handleAddFolder() {
     const scanSettings = { junkKeywords: state.settings.junkKeywords, minFileSizeMb: state.settings.minFileSizeMb };
     const result = await api.scanFolders(newFolders, state.settings.excludedFolders, scanSettings);
     const existingMoviePaths = new Set(state.library.map(f => f.path));
-    const existingTVPaths    = new Set(state.tvShows.map(s => s.path));
+    // Lowercased — Windows paths are case-insensitive and the lookup below
+    // compares lowercased values (was a mismatch that broke deduping).
+    const existingTVPaths    = new Set(state.tvShows.map(s => (s.path || '').toLowerCase()));
     const normTitle = t => (t||'').toLowerCase().replace(/[^a-z0-9]/g,'').trim();
 
     const freshMovies = (result.movies || []).filter(f =>
@@ -460,6 +471,7 @@ async function handleAddFolder() {
 
     const freshTV = [];
     for (const s of (result.tvShows || [])) {
+      if (state.hiddenItems.includes(s.id)) continue;
       if (state.hiddenFolders.some(hf => (s.path||'').startsWith(hf))) continue;
 
       const existing = state.tvShows.find(ex =>
@@ -521,9 +533,24 @@ function hideItem(item) {
 // ─── Hide folder ──────────────────────────────────────────
 function hideFolder(folderPath) {
   if (!state.hiddenFolders.includes(folderPath)) state.hiddenFolders.push(folderPath);
-  // Remove items from that folder
-  const before = state.library.length;
+  // Remove items from that folder — movies AND TV content (episodes under
+  // the folder are dropped; shows left with no episodes are removed).
+  const before = state.library.length + state.tvShows.length;
   state.library = state.library.filter(f => !f.path.startsWith(folderPath));
+  state.tvShows = state.tvShows.filter(show => {
+    if ((show.path || '').startsWith(folderPath)) return false;
+    if (Array.isArray(show.episodes)) {
+      const kept = show.episodes.filter(e => !(e.path || '').startsWith(folderPath));
+      if (!kept.length) return false;
+      if (kept.length !== show.episodes.length) {
+        show.episodes     = kept;
+        show.episodeCount = kept.length;
+        show.seasonCount  = new Set(kept.map(e => e.season)).size;
+        show.size         = kept.reduce((n, e) => n + (e.size || 0), 0);
+      }
+    }
+    return true;
+  });
   // Remove from watched folders too
   state.folders = state.folders.filter(f => f !== folderPath);
   saveLibrary();
@@ -531,7 +558,8 @@ function hideFolder(folderPath) {
   updateStats();
   updateFolderList();
   updateHiddenFolderList();
-  showToast(`Folder hidden (${before - state.library.length} items removed)`, 'info');
+  const removed = before - (state.library.length + state.tvShows.length);
+  showToast(`Folder hidden (${removed} item${removed !== 1 ? 's' : ''} removed)`, 'info');
 }
 
 // ─── Metadata queue ───────────────────────────────────────
@@ -3060,9 +3088,25 @@ function buildEpisodeCard(localEp, tmdbEp, onWatchedToggle, isDuplicate) {
 // CINEMATIC DETAIL OVERLAY (Detailed view mode)
 // ═══════════════════════════════════════════════════════
 
+// Document-level listeners registered by cinematic overlays. Tracked so they
+// can be removed on close — previously each overlay open leaked an Escape
+// handler and an outside-click handler onto `document` forever.
+const _cinDocListeners = [];
+function cinAddDocListener(type, handler) {
+  document.addEventListener(type, handler);
+  _cinDocListeners.push([type, handler]);
+}
+function cinRemoveDocListeners() {
+  while (_cinDocListeners.length) {
+    const [type, handler] = _cinDocListeners.pop();
+    document.removeEventListener(type, handler);
+  }
+}
+
 function closeDetailedOverlay() {
   const overlay = document.getElementById('cinematic-overlay');
   if (overlay) overlay.style.setProperty('display', 'none', 'important');
+  cinRemoveDocListeners();
   state.activeItem = null;
 }
 
@@ -3079,8 +3123,9 @@ async function openDetailedOverlay(item, mode) {
   overlay.style.setProperty('display', 'block', 'important');
   inner.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:14px;color:rgba(255,255,255,.6);font-size:14px;"><div class="spinner"></div>Loading…</div>`;
 
-  // Remove any leftover floating toolbar from previous overlay
+  // Remove any leftover floating toolbar / document listeners from previous overlay
   document.querySelectorAll('.cin-floating-toolbar').forEach(el => el.remove());
+  cinRemoveDocListeners();
 
   // Fetch metadata if needed
   if (!state.metadataFetched.has(itemSnapshot.id) && (state.settings.tmdbKey || state.settings.omdbKey)) {
@@ -3204,9 +3249,9 @@ function cinFloatingToolbar(item) {
     panel.style.display = panelOpen ? 'flex' : 'none';
     trigger.style.background = panelOpen ? 'rgba(255,255,255,.2)' : 'rgba(255,255,255,.1)';
   });
-  document.addEventListener('click', function outsideHandler(e) {
-    if (!wrap.contains(e.target)) { closePanel(); }
-  }, { once: false });
+  cinAddDocListener('click', e => {
+    if (!wrap.contains(e.target)) closePanel();
+  });
 
   wrap.appendChild(panel);
   wrap.appendChild(trigger);
@@ -3401,8 +3446,7 @@ function renderCinematicStyleA(inner, item, m, backdropUrl) {
   const cs = cinCastSection(item,m); if(cs) content.appendChild(cs);
   content.appendChild(cinFileInfo(item));
   cinLazyStreamingProviders(item, m, heroInfo.querySelector('h1'));
-  const escH = e => { if(e.key==='Escape'){closeDetailedOverlay();document.removeEventListener('keydown',escH);}};
-  document.addEventListener('keydown', escH);
+  cinAddDocListener('keydown', e => { if (e.key === 'Escape') closeDetailedOverlay(); });
 }
 
 // ── Style B: Focused ──────────────────────────────────────
@@ -3450,8 +3494,7 @@ function renderCinematicStyleB(inner, item, m, backdropUrl) {
   inner.appendChild(leftPanel);
   inner.appendChild(rightPanel);
   cinLazyStreamingProviders(item, m, leftPanel.querySelector('h1'));
-  const escH = e => { if(e.key==='Escape'){closeDetailedOverlay();document.removeEventListener('keydown',escH);}};
-  document.addEventListener('keydown', escH);
+  cinAddDocListener('keydown', e => { if (e.key === 'Escape') closeDetailedOverlay(); });
 }
 
 // ── Style C: Cinematic ────────────────────────────────────
@@ -3524,8 +3567,7 @@ function renderCinematicStyleC(inner, item, m, backdropUrl) {
 
   inner.appendChild(bar);
   cinLazyStreamingProviders(item, m, streamWrap);
-  const escH = e => { if(e.key==='Escape'){closeDetailedOverlay();document.removeEventListener('keydown',escH);}};
-  document.addEventListener('keydown', escH);
+  cinAddDocListener('keydown', e => { if (e.key === 'Escape') closeDetailedOverlay(); });
 }
 
 
@@ -3694,10 +3736,12 @@ async function handleRescan(silent = false) {
 
     const newMovies = (result.movies || []).filter(f =>
       !existingMoviePaths.has((f.path||'').toLowerCase()) &&
+      !state.hiddenItems.includes(f.id) &&
       !state.hiddenFolders.some(hf => (f.path||'').startsWith(hf))
     );
     const newTV = [];
     for (const s of (result.tvShows || [])) {
+      if (state.hiddenItems.includes(s.id)) continue;
       if (state.hiddenFolders.some(hf => (s.path||'').startsWith(hf))) continue;
 
       // Find an existing show that matches by id, normalised title, or tmdbId
@@ -3814,7 +3858,14 @@ function removeFromWatchlist(tmdbId) {
 
 function toggleWatchlistWatched(tmdbId) {
   const item = state.watchlist.find(w => String(w.tmdbId) === String(tmdbId));
-  if (item) { item.watched = !item.watched; saveLibrary(); renderWatchlist(); }
+  if (item) {
+    item.watched = !item.watched;
+    // Marking watched also dismisses any New & Upcoming flag — otherwise the
+    // item stayed pinned (greyed) in that section AND appeared under Watched.
+    if (item.watched && item.newSeasonInfo) item.newSeasonInfo.dismissed = true;
+    saveLibrary();
+    renderWatchlist();
+  }
 }
 
 function updateWatchlistBadge(forceShow = false) {
@@ -3860,8 +3911,9 @@ function renderWatchlist() {
   const watched     = state.watchlist.filter(w => w.watched);
 
   // ── New / Upcoming seasons section ───────────────────
+  // Watched items are excluded — they belong in the Watched section only.
   const newSeasonItems = state.watchlist.filter(w =>
-    w.newSeasonInfo && !w.newSeasonInfo.dismissed
+    w.newSeasonInfo && !w.newSeasonInfo.dismissed && !w.watched
   );
   if (newSeasonItems.length) {
     const sec = document.createElement('div');
@@ -4675,6 +4727,7 @@ async function openWatchlistTVOverlay(wlItem) {
   const inner   = document.getElementById('cinematic-inner');
   if (!overlay || !inner) return;
   document.querySelectorAll('.cin-floating-toolbar').forEach(el => el.remove());
+  cinRemoveDocListeners();
   overlay.style.setProperty('display', 'block', 'important');
   inner.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:14px;color:rgba(255,255,255,.6);font-size:14px;"><div class="spinner"></div>Loading…</div>`;
 
@@ -4739,6 +4792,7 @@ async function openWatchlistTVOverlay(wlItem) {
   const origClose = closeDetailedOverlay;
   const wlClose = () => {
     overlay.style.setProperty('display', 'none', 'important');
+    cinRemoveDocListeners();
     state.activeItem = null;
     // Re-render watchlist to reflect any watched changes
     renderWatchlist();
@@ -4882,9 +4936,8 @@ function renderWLCinematicContent(inner, item, m, backdropUrl, mode, wlItem, clo
   infoWrap.appendChild(infoDetails);
   content.appendChild(infoWrap);
 
-  // Esc key
-  const escH = e => { if (e.key === 'Escape') { closeOverlay(); document.removeEventListener('keydown', escH); } };
-  document.addEventListener('keydown', escH);
+  // Esc key — registered via the tracked helper so it's removed on close
+  cinAddDocListener('keydown', e => { if (e.key === 'Escape') closeOverlay(); });
 }
 
 let _wlEpRenderSeq = 0;
@@ -5037,6 +5090,7 @@ async function pruneDeletedFiles(silent = false) {
     const { missingMovieIds, missingTVIds, missingEpisodes } = await api.checkFilesExist({
       movies: state.library,
       tvShows: state.tvShows,
+      folders: state.folders, // lets main skip items on offline/unmounted roots
     });
 
     // Remove entire missing movies
@@ -5181,8 +5235,11 @@ async function checkWatchlistNewSeasons(notify = false) {
         const prev = item.newSeasonInfo;
         const prevKey = item.mediaType === 'tv' ? prev?.season : prev?.airDate;
         const curKey  = item.mediaType === 'tv' ? seasonNum    : airDate?.toISOString().split('T')[0];
-        // Re-flag if: no previous flag, different season, or was dismissed on old season
-        if (!prev || prevKey !== curKey || (prev.dismissed && prevKey === curKey)) {
+        // Re-flag only if there was no previous flag or this is a DIFFERENT
+        // season/date. A flag dismissed (or watched) for the same season must
+        // stay dismissed — it was previously re-activated on every check,
+        // which made watching/dismissing items pointless.
+        if (!prev || prevKey !== curKey) {
           item.newSeasonInfo = {
             season:    seasonNum,
             airDate:   airDate?.toISOString().split('T')[0],
@@ -5704,6 +5761,7 @@ function markTVGuideEntrySeen(item) {
     const wlItem = state.watchlist.find(w => String(w.tmdbId) === tmdbId);
     if (wlItem) {
       wlItem.watched = true;
+      if (wlItem.newSeasonInfo) wlItem.newSeasonInfo.dismissed = true;
       saveLibrary();
       renderWatchlist();
       showToast(`"${item.showTitle}" marked as watched`, 'success');

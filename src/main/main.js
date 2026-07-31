@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell, protocol, net, safeStorage }
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const https = require('https');
 const http = require('http');
 
@@ -82,15 +83,38 @@ const DEFAULT_JUNK_KEYWORDS = [
 ];
 const DEFAULT_MIN_SIZE_MB = 50;
 
+// Junk keyword matching is TOKEN-based, not substring-based — substring
+// matching caused false positives like "Extraction" matching 'extra',
+// "…info…" matching 'nfo', or "The Big Short" matching 'short'.
+// A filename keyword hit is additionally ignored when the file looks like a
+// real release (has a year token AND meets the minimum size) since samples,
+// trailers and extras are small and rarely carry a year tag.
+// User keywords are ADDITIVE to the defaults (previously an empty user list
+// silently disabled the defaults during scans).
+function normTokens(s) {
+  return String(s).toLowerCase().replace(/[._\-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
 function isJunkFile(filename, sizeBytes, userSettings, filePath) {
-  const keywords = (userSettings && userSettings.junkKeywords) || DEFAULT_JUNK_KEYWORDS;
+  const keywords = [...DEFAULT_JUNK_KEYWORDS, ...((userSettings && userSettings.junkKeywords) || [])];
   const minSizeMb = (userSettings && userSettings.minFileSizeMb) != null
     ? userSettings.minFileSizeMb : DEFAULT_MIN_SIZE_MB;
-  const lower = filename.toLowerCase();
-  // Check filename AND folder path for junk keywords
-  const pathLower = (filePath || '').toLowerCase().replace(/\\/g, '/');
-  const checkStr = lower + '|' + pathLower;
-  if (keywords.some(k => checkStr.includes(k.toLowerCase()))) return true;
+
+  const kwNorms = [...new Set(keywords.map(normTokens).filter(Boolean))];
+  const nameNoExt = filename.replace(/\.[^/.]+$/, '');
+  const normName = ' ' + normTokens(nameNoExt) + ' ';
+
+  const hasYear = /\b(19|20)\d{2}\b/.test(nameNoExt);
+  const minBytes = (minSizeMb > 0 ? minSizeMb : DEFAULT_MIN_SIZE_MB) * 1024 * 1024;
+  const looksLikeRealRelease = hasYear && sizeBytes >= minBytes;
+
+  if (!looksLikeRealRelease &&
+      kwNorms.some(k => normName.includes(' ' + k + ' '))) return true;
+
+  // Folder segments: exact match (or simple plural) against any parent dir,
+  // e.g. an "Extras" or "Samples" folder marks its contents as junk.
+  const segs = (filePath || '').split(/[\\/]/).slice(0, -1).map(normTokens);
+  if (segs.some(seg => kwNorms.some(k => seg === k || seg === k + 's'))) return true;
+
   // Global minimum size
   if (minSizeMb > 0 && sizeBytes < minSizeMb * 1024 * 1024) return true;
   return false;
@@ -119,6 +143,13 @@ function getFolderJunkFiles(videoEntries, userSettings) {
     if (e.size < threshold) junk.add(e.name);
   });
   return junk;
+}
+
+// Stable, collision-safe item id from a file path. The previous scheme
+// (first 20 chars of base64(path) + mtime) collided for files in the same
+// deep folder that shared an mtime, breaking hide/metadata tracking.
+function pathId(fullPath) {
+  return 'f_' + crypto.createHash('sha1').update(fullPath.toLowerCase()).digest('hex').substring(0, 24);
 }
 
 function humanSize(bytes) {
@@ -275,8 +306,7 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
     const fullPathLower = fullPath.toLowerCase();
     if (group.episodes.some(e => e.path.toLowerCase() === fullPathLower)) return;
     group.episodes.push({
-      id: Buffer.from(fullPath).toString('base64')
-            .replace(/[^a-zA-Z0-9]/g, '').substring(0, 20) + '_' + stat.mtimeMs,
+      id: pathId(fullPath),
       path: fullPath, filename: entry.name, extension: ext,
       size: stat.size, sizeHuman: humanSize(stat.size),
       createdAt: stat.birthtime.toISOString(),
@@ -289,8 +319,7 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
     if (movieMap.has(fullPath)) return;
     const parsed = parseMovieName(entry.name, fullPath);
     movieMap.set(fullPath, {
-      id: Buffer.from(fullPath).toString('base64')
-            .replace(/[^a-zA-Z0-9]/g, '').substring(0, 20) + '_' + stat.mtimeMs,
+      id: pathId(fullPath),
       type: 'movie', path: fullPath, filename: entry.name, extension: ext,
       size: stat.size, sizeHuman: humanSize(stat.size),
       createdAt: stat.birthtime.toISOString(),
@@ -413,9 +442,11 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
       return c || common;
     }, allDirs[0]);
     tvShows.push({
-      id: 'tv_' + Buffer.from(
+      // Full-title hash — the old truncated-base64 scheme collided for
+      // shows sharing a long common title prefix.
+      id: 'tv_' + crypto.createHash('sha1').update(
             (group.title || 'unknown').toLowerCase().replace(/[^a-z0-9]/g, '')
-          ).toString('base64').replace(/[^a-zA-Z0-9]/g,'').substring(0,24),
+          ).digest('hex').substring(0, 24),
       type: 'tv',
       path: showRootPath,
       title: group.title,
@@ -480,13 +511,25 @@ ipcMain.handle('clear-item-cache', async (event, ids) => {
   return { ok: true };
 });
 
-ipcMain.handle('check-files-exist', async (event, { movies, tvShows }) => {
+ipcMain.handle('check-files-exist', async (event, { movies, tvShows, folders }) => {
   const missingMovieIds  = [];
   const missingTVIds     = [];
   const missingEpisodes  = {};
 
+  // Watched root folders that are currently unreachable (unmounted USB drive,
+  // disconnected NAS, …). Items under these roots are SKIPPED rather than
+  // treated as deleted — otherwise a temporarily offline drive would wipe the
+  // whole library (including episode watched-states) at startup.
+  const offlineRoots = (folders || [])
+    .filter(f => { try { return !fs.existsSync(f); } catch { return true; } })
+    .map(f => f.toLowerCase());
+  const isOffline = p => {
+    const pl = (p || '').toLowerCase();
+    return offlineRoots.some(r => pl === r || pl.startsWith(r + path.sep) || pl.startsWith(r + '/'));
+  };
+
   for (const movie of (movies || [])) {
-    if (movie.path && !fs.existsSync(movie.path)) {
+    if (movie.path && !isOffline(movie.path) && !fs.existsSync(movie.path)) {
       missingMovieIds.push(movie.id);
     }
   }
@@ -494,7 +537,7 @@ ipcMain.handle('check-files-exist', async (event, { movies, tvShows }) => {
   for (const show of (tvShows || [])) {
     const eps = show.episodes || [];
     const missingPaths = eps
-      .filter(e => e.path && !fs.existsSync(e.path))
+      .filter(e => e.path && !isOffline(e.path) && !fs.existsSync(e.path))
       .map(e => e.path);
 
     if (missingPaths.length === eps.length && eps.length > 0) {
@@ -532,27 +575,45 @@ function downloadImage(url, dest, _depth = 0) {
   return new Promise((resolve, reject) => {
     if (_depth > MAX_REDIRECTS) { reject(new Error('Too many redirects')); return; }
     const proto = url.startsWith('https') ? https : http;
-    const file = fs.createWriteStream(dest);
-    proto.get(url, (res) => {
-      if (res.statusCode === 301 || res.statusCode === 302) {
-        file.close();
-        downloadImage(res.headers.location, dest, _depth + 1).then(resolve).catch(reject);
+    const req = proto.get(url, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+        res.resume();
+        if (!res.headers.location) { reject(new Error('Redirect without Location header')); return; }
+        // Resolve relative redirect targets against the current URL
+        const next = new URL(res.headers.location, url).href;
+        downloadImage(next, dest, _depth + 1).then(resolve).catch(reject);
         return;
       }
+      // Only write the file on 200 — previously a 404/500 error body was
+      // saved as poster.jpg and then served as a valid cached image.
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode}`));
+        return;
+      }
+      const file = fs.createWriteStream(dest);
       res.pipe(file);
       file.on('finish', () => { file.close(); resolve(dest); });
+      file.on('error', err => { fs.unlink(dest, () => {}); reject(err); });
     }).on('error', err => { fs.unlink(dest, () => {}); reject(err); });
+    req.setTimeout(20000, () => req.destroy(new Error('Download timed out')));
   });
 }
 
 function httpsGet(url) {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith('https') ? https : http;
-    proto.get(url, { headers: { 'User-Agent': 'MediaVault/1.0' } }, (res) => {
+    const req = proto.get(url, { headers: { 'User-Agent': 'MediaVault/1.0' } }, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode}`));
+        return;
+      }
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { reject(new Error('Invalid JSON')); } });
     }).on('error', reject);
+    req.setTimeout(15000, () => req.destroy(new Error('Request timed out')));
   });
 }
 
@@ -884,6 +945,24 @@ ipcMain.handle('remap-apply', async (event, item, tmdbId, mediaType) => {
   const safeName = (item.title || 'unknown').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 40);
   const oldKey = item.type === 'tv' ? `tv_${safeName}` : `mv_${safeName}_${item.year || ''}`;
   try { fs.unlinkSync(path.join(CACHE_DIR, `${oldKey}_meta.json`)); } catch {}
+  // Also purge the id-keyed cache used by fetch-metadata — otherwise a later
+  // "Refresh metadata" re-reads the pre-remap cache and reverts the remap.
+  const itemCacheId = (item.id || '').replace(/[^a-zA-Z0-9]/g, '').substring(0, 40);
+  const idMetaPath   = itemCacheId ? path.join(CACHE_DIR, `id_${itemCacheId}_meta.json`)  : null;
+  const idPosterPath = itemCacheId ? path.join(CACHE_DIR, `id_${itemCacheId}_poster.jpg`) : null;
+  if (idMetaPath)   { try { fs.unlinkSync(idMetaPath); }   catch {} }
+  if (idPosterPath) { try { fs.unlinkSync(idPosterPath); } catch {} }
+  // After the remap completes we re-write these id-keyed files with the
+  // remapped metadata so future fetch-metadata calls return the corrected
+  // mapping instead of re-searching by (wrong) title.
+  const writeIdCache = (metaObj, posterSrcPath) => {
+    try {
+      if (idMetaPath) fs.writeFileSync(idMetaPath, JSON.stringify(metaObj, null, 2));
+      if (idPosterPath && posterSrcPath && fs.existsSync(posterSrcPath)) {
+        fs.copyFileSync(posterSrcPath, idPosterPath);
+      }
+    } catch {}
+  };
   const preview = await httpsGet(`https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${tmdbKey}`).catch(() => null);
   if (!preview) return { error: 'Could not fetch title details' };
   const newTitle = preview.title || preview.name || item.title;
@@ -895,6 +974,7 @@ ipcMain.handle('remap-apply', async (event, item, tmdbId, mediaType) => {
   if (fs.existsSync(metaPath)) {
     const cached = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
     cached.posterPath = fs.existsSync(posterPath) ? posterPath : null;
+    writeIdCache(cached, cached.posterPath);
     return { meta: cached, newTitle, newType: mediaType };
   }
   let meta = {};
@@ -934,6 +1014,7 @@ ipcMain.handle('remap-apply', async (event, item, tmdbId, mediaType) => {
     }
     if (meta.posterUrl) { try { await downloadImage(meta.posterUrl, posterPath); meta.posterPath = posterPath; } catch {} }
     fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+    writeIdCache(meta, meta.posterPath);
     return { meta, newTitle, newType: mediaType };
   } catch (err) { return { error: err.message }; }
 });
