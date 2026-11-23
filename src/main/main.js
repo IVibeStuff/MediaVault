@@ -163,6 +163,11 @@ function cleanTitle(raw) {
   return raw
     // Strip parenthesised codec/format/language tags FIRST e.g. (Xvid), (x264), (Eng)
     .replace(/\([^)]{1,20}\)/g, ' ')
+    // Multi-part codec tags in any separator form: "DDP5 1", "DD5.1", "AAC2 0",
+    // "H 264" — previously only dotted forms were caught, leaving fragments
+    // like "DDP5 1 H 264" in titles and breaking TMDB lookups.
+    .replace(/\b(DDP?|DD|AAC|AC3|EAC3|TrueHD|DTS)[\s._]?\d[\s._]\d\b/gi, ' ')
+    .replace(/\bH[\s._]?26[45]\b/gi, ' ')
     // Quality / codec / source / language tags
     .replace(/\b(2160p|1080p|720p|480p|4K|UHD|BluRay|BRRip|HDRip|WEBRip|WEB-DL|WEBDL|HDTV|x264|x265|HEVC|H264|H265|AAC|AC3|DTS|PROPER|REPACK|EXTENDED|DIRECTORS|CUT|UNRATED|THEATRICAL|IMAX|3D|HDR|SDR|REMUX|DOLBY|ATMOS|AMZN|NF|DSNP|HULU|HBO|YIFY|YTS|RARBG|10bit|8bit|DD5|DD2|h265|h264|ws|ntsc|pal|dvd|dvdrip|bdrip|hdrip|webrip|hdtv|pdtv|fs|fullscreen|widescreen|internal|limited|retail|proper|readnfo|nfofix|ac3d|dubbed|subbed|multi|dual|trueHD|dovi|doVi|HDR10|hdr10|atmos|xvid|divx|eng|english|french|german|spanish|italian|portuguese|dutch|swedish|danish|finnish|norwegian|estonian|eur|usa|uk)\b/gi, '')
     // Release group tag at end: "-GroupName" pattern (word chars 2-12 long after final dash)
@@ -216,6 +221,10 @@ function extractShowTitle(name) {
     .replace(/[Ss]eason[\s._-]?\d+.*/i, '')
     .replace(/[._\s\-][Ss]\d{1,2}[-–][Ss]\d{1,2}.*/i, '')
     .replace(/[Ss]\d{1,2}[-–][Ss]\d{1,2}.*/i, '')
+    // Bare season tag of a season pack, e.g. "Show Name S04 1080p …"
+    .replace(/[._\s\-][Ss]\d{1,2}(?=[._\s\-]|$).*/, '')
+    // Everything from the first resolution/source tag onward is release info
+    .replace(/[._\s\-](2160p|1080p|720p|576p|480p|4K|UHD|WEB[-_. ]?DL|WEBRip|BluRay|BDRip|HDTV|DVDRip)\b.*/i, '')
     .replace(/\b(19|20)\d{2}\b.*/i, '')
     .replace(/[\s([{.,_-]+$/, '');
   const cleaned = cleanTitle(t);
@@ -281,6 +290,20 @@ function seasonFolderNumber(name) {
             /^s(\d{1,2})(?:[\s._-]|$)/i.exec(name) ||
             /\bseason[\s._-]?(\d+)/i.exec(name);
   return m ? parseInt(m[1]) : 1;
+}
+
+// Season number from a season-pack folder name like "Show S04 1080p WEB-DL"
+// (bare S## not followed by E##). Returns null if not a season pack.
+function seasonPackNumber(name) {
+  const m = /(?:^|[._\s\-])[Ss](\d{1,2})(?=[._\s\-]|$)/.exec(name);
+  return m ? parseInt(m[1]) : null;
+}
+// Episode number from a leading number in a filename: "01 - Pilot.mkv", "03.mkv"
+function leadingEpisodeNumber(filename) {
+  const m = /^(\d{1,3})(?:[\s._\-]|$)/.exec(filename.replace(/\.[^/.]+$/, ''));
+  if (!m) return null;
+  const n = parseInt(m[1]);
+  return n >= 1 && n <= 199 ? n : null;
 }
 
 function scanDirectory(rootPath, excludedPaths, userSettings) {
@@ -387,14 +410,27 @@ function scanDirectory(rootPath, excludedPaths, userSettings) {
         const ep = epInfo ? epInfo.episode : 0;
         addEpisode(fullPath, entry, stat, ext, showTitle, seasonNum, ep);
       } else if (epInfo) {
-        let showTitle = extractShowTitle(entry.name);
-        if (!showTitle) showTitle = extractShowTitle(dirBase) || cleanTitle(dirBase) || 'Unknown Show';
-        const effectiveSeason = epInfo.season;
+        // Strip the extension first, and treat titles that are only an episode
+        // token ("E01", "Ep 3", "01") as missing so the folder name is used.
+        let showTitle = extractShowTitle(entry.name.replace(/\.[^/.]+$/, ''));
+        if (!showTitle || /^(s\d{1,2})?\s*(e|ep|episode)?\s*\d{1,3}$/i.test(showTitle)) {
+          showTitle = extractShowTitle(dirBase) || cleanTitle(dirBase) || 'Unknown Show';
+        }
+        // If the file has no season but the folder is a season pack ("… S04 …"),
+        // take the season from the folder.
+        const packSeason = seasonPackNumber(dirBase);
+        const effectiveSeason = (!/[Ss]\d{1,2}[Ee]\d|\d{1,2}x\d{2}/.test(entry.name) && packSeason)
+          ? packSeason : epInfo.season;
         addEpisode(fullPath, entry, stat, ext, showTitle, effectiveSeason, epInfo.episode);
       } else if (dirEpInfo) {
         // Episode info came from the folder name — use folder for both title and episode.
         const showTitle = extractShowTitle(dirBase) || cleanTitle(dirBase) || 'Unknown Show';
         addEpisode(fullPath, entry, stat, ext, showTitle, dirEpInfo.season, dirEpInfo.episode);
+      } else if (seasonPackNumber(dirBase) && leadingEpisodeNumber(entry.name) !== null) {
+        // Season-pack folder ("Show S04 1080p …") with files like "01 - Title.mkv"
+        // — previously misfiled as movies.
+        const showTitle = extractShowTitle(dirBase) || cleanTitle(dirBase) || 'Unknown Show';
+        addEpisode(fullPath, entry, stat, ext, showTitle, seasonPackNumber(dirBase), leadingEpisodeNumber(entry.name));
       } else {
         addMovie(fullPath, entry, stat, ext);
       }
