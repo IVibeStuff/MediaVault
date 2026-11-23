@@ -1,0 +1,70 @@
+name: Build & Release
+
+# Run manually from the Actions tab ("Run workflow"), or by pushing a tag like v1.7.3.
+# Builds the Windows installer, creates the vX.Y.Z tag + GitHub release, and
+# attaches MediaVault-Setup-X.Y.Z.exe. The version always comes from package.json.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Generate assets/icon.ico from assets/icon.svg
+        shell: bash
+        run: |
+          if [ ! -f assets/icon.ico ]; then
+            npm install --no-save sharp png-to-ico
+            node .github/scripts/make-icon.mjs
+          fi
+
+      - name: Build installer
+        run: npx electron-builder --win --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Pick release notes
+        id: notes
+        shell: bash
+        run: |
+          f="release-notes/${{ steps.ver.outputs.version }}.md"
+          if [ -f "$f" ]; then echo "file=$f" >> "$GITHUB_OUTPUT"; else echo "file=" >> "$GITHUB_OUTPUT"; fi
+
+      # Created as a draft first so the in-app update checker never sees a
+      # release without its installer; published in the next step.
+      - name: Create draft release with installer
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: MediaVault ${{ steps.ver.outputs.version }}
+          body_path: ${{ steps.notes.outputs.file }}
+          generate_release_notes: ${{ steps.notes.outputs.file == '' }}
+          files: dist/MediaVault-Setup-${{ steps.ver.outputs.version }}.exe
+          fail_on_unmatched_files: true
+          draft: true
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "v${{ steps.ver.outputs.version }}" --draft=false --latest
